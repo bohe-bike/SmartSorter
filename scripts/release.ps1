@@ -1,15 +1,16 @@
 <#
 .SYNOPSIS
-  SmartSorter 发布脚本 — 自动同步版本号、提交代码、打 Git Tag
+  SmartSorter 发布脚本 — 编译可执行文件、同步版本号、提交代码、打 Git Tag
 
 .DESCRIPTION
-  用法：.\scripts\release.ps1 -Version "1.1.0" [-Message "发布说明"]
+  用法：.\scripts\release.ps1 -Version "1.1.0" [-Message "发布说明"] [-Push] [-SkipBuild]
   
   执行步骤：
   1. 更新 package.json、Cargo.toml、tauri.conf.json 中的版本号
-  2. git add + commit
-  3. 创建 git tag (v1.1.0)
-  4. 可选推送到远程
+  2. 编译前端 + Tauri 生产版本
+  3. git add + commit
+  4. 创建 git tag (v1.1.0)
+  5. 可选推送到远程（push tag 后 GitHub Actions 会自动创建 Release 并上传产物）
 
 .PARAMETER Version
   目标版本号，如 "1.1.0"（不带 v 前缀）
@@ -19,6 +20,9 @@
 
 .PARAMETER Push
   是否自动推送到远程（默认 $false）
+
+.PARAMETER SkipBuild
+  跳过编译步骤（仅更新版本号和打 tag）
 #>
 param(
     [Parameter(Mandatory = $true)]
@@ -26,7 +30,9 @@ param(
 
     [string]$Message = "",
 
-    [switch]$Push = $false
+    [switch]$Push = $false,
+
+    [switch]$SkipBuild = $false
 )
 
 $ErrorActionPreference = "Stop"
@@ -77,14 +83,40 @@ $tauri = Get-Content $tauriPath -Raw
 $tauri = $tauri -replace '"version"\s*:\s*"[^"]*"', "`"version`": `"$Version`""
 Set-Content -Path $tauriPath -Value $tauri -NoNewline -Encoding UTF8
 
-# ---- 4. Git commit ----
-Write-Host "[4/5] Git commit ..." -ForegroundColor Yellow
+# ---- 4. 编译 ----
+if (-not $SkipBuild) {
+    Write-Host "`n[4/7] 编译前端 ..." -ForegroundColor Yellow
+    Push-Location $root
+    pnpm build
+    if ($LASTEXITCODE -ne 0) { Write-Error "前端编译失败"; exit 1 }
+
+    Write-Host "[5/7] 编译 Tauri 生产版本 ..." -ForegroundColor Yellow
+    cargo tauri build
+    if ($LASTEXITCODE -ne 0) { Write-Error "Tauri 编译失败"; exit 1 }
+    Pop-Location
+
+    # 查找产物
+    $bundleDir = Join-Path $root "src-tauri\target\release\bundle"
+    $msi = Get-ChildItem "$bundleDir\msi\*.msi" -ErrorAction SilentlyContinue | Select-Object -First 1
+    $nsis = Get-ChildItem "$bundleDir\nsis\*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+    $exe = Join-Path $root "src-tauri\target\release\SmartSorter.exe"
+
+    Write-Host "`n构建产物：" -ForegroundColor Green
+    if (Test-Path $exe) { Write-Host "  EXE:  $exe" }
+    if ($msi)  { Write-Host "  MSI:  $($msi.FullName)" }
+    if ($nsis) { Write-Host "  NSIS: $($nsis.FullName)" }
+} else {
+    Write-Host "`n[4/7] 跳过编译 (SkipBuild)" -ForegroundColor DarkGray
+}
+
+# ---- 5. Git commit ----
+Write-Host "`n[6/7] Git commit ..." -ForegroundColor Yellow
 Push-Location $root
 git add package.json src-tauri/Cargo.toml src-tauri/tauri.conf.json CHANGELOG.md
 git commit -m $Message
 
-# ---- 5. Git tag ----
-Write-Host "[5/5] 创建 Git Tag v$Version ..." -ForegroundColor Yellow
+# ---- 6. Git tag ----
+Write-Host "[7/7] 创建 Git Tag v$Version ..." -ForegroundColor Yellow
 git tag -a "v$Version" -m $Message
 Pop-Location
 
