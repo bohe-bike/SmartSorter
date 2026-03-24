@@ -37,12 +37,12 @@ fn compute_rename(source: &Path, params: &RenameParams, ctx: &mut TransformConte
             stem.replace(find, replace_with)
         }
         RenameMode::Prefix => {
-            let prefix = params.detail.get("prefix").and_then(|v| v.as_str()).unwrap_or("");
+            let prefix = params.detail.get("text").and_then(|v| v.as_str()).unwrap_or("");
             let expanded = expand_template(prefix, source, ctx);
             format!("{}{}", expanded, stem)
         }
         RenameMode::Suffix => {
-            let suffix = params.detail.get("suffix").and_then(|v| v.as_str()).unwrap_or("");
+            let suffix = params.detail.get("text").and_then(|v| v.as_str()).unwrap_or("");
             let expanded = expand_template(suffix, source, ctx);
             format!("{}{}", stem, expanded)
         }
