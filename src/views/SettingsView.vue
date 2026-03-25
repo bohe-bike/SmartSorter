@@ -72,7 +72,7 @@ applyTheme(theme.value);
     <section class="settings-group">
       <h3>关于</h3>
       <div class="about-info">
-        <p><strong>SmartSorter</strong> v1.0.0</p>
+        <p><strong>SmartSorter</strong> v1.3.0</p>
         <p>桌面端文件智能整理工具</p>
         <p class="tech">Tauri 2 + Vue 3 + Rust</p>
       </div>

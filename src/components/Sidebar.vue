@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { useRoute } from "vue-router";
+import appLogo from "../assets/logo.svg";
 
 const route = useRoute();
 
 const navItems = [
   { path: "/", icon: "📂", label: "整理" },
   { path: "/duplicate", icon: "🔍", label: "去重" },
+  { path: "/media-classify", icon: "🎵", label: "归类" },
   { path: "/history", icon: "📋", label: "历史" },
   { path: "/settings", icon: "⚙️", label: "设置" },
 ];
@@ -13,7 +15,7 @@ const navItems = [
 
 <template>
   <nav class="sidebar">
-    <div class="logo">SS</div>
+    <img class="logo" :src="appLogo" alt="SmartSorter" />
     <router-link
       v-for="item in navItems"
       :key="item.path"
@@ -42,14 +44,7 @@ const navItems = [
 .logo {
   width: 36px;
   height: 36px;
-  border-radius: 8px;
-  background: var(--color-primary);
-  color: #fff;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-weight: 700;
-  font-size: 13px;
+  object-fit: contain;
   margin-bottom: 16px;
 }
 

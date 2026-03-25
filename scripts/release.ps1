@@ -91,7 +91,9 @@ if (-not $SkipBuild) {
     if ($LASTEXITCODE -ne 0) { Write-Error "前端编译失败"; exit 1 }
 
     Write-Host "[5/7] 编译 Tauri 生产版本 ..." -ForegroundColor Yellow
+    Push-Location (Join-Path $root "src-tauri")
     cargo tauri build
+    Pop-Location
     if ($LASTEXITCODE -ne 0) { Write-Error "Tauri 编译失败"; exit 1 }
     Pop-Location
 
@@ -99,7 +101,7 @@ if (-not $SkipBuild) {
     $bundleDir = Join-Path $root "src-tauri\target\release\bundle"
     $msi = Get-ChildItem "$bundleDir\msi\*.msi" -ErrorAction SilentlyContinue | Select-Object -First 1
     $nsis = Get-ChildItem "$bundleDir\nsis\*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
-    $exe = Join-Path $root "src-tauri\target\release\SmartSorter.exe"
+    $exe = Join-Path $root "src-tauri\target\release\smart-sorter.exe"
 
     Write-Host "`n构建产物：" -ForegroundColor Green
     if (Test-Path $exe) { Write-Host "  EXE:  $exe" }

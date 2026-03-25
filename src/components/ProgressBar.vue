@@ -8,6 +8,7 @@ defineProps<{
 
 const phaseLabels: Record<string, string> = {
   scanning: "扫描文件中…",
+  extracting: "提取作者中…",
   hashing: "计算哈希中…",
   matching: "匹配规则中…",
   executing: "执行操作中…",

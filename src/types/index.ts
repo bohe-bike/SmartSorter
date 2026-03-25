@@ -194,6 +194,55 @@ export interface DuplicateFile {
   keep: boolean;
 }
 
+// ========== 媒体作者归类 ==========
+
+export interface MediaClassifyResult {
+  task_id: string;
+  scanned_count: number;
+  total_authors: number;
+  no_author_count: number;
+  groups: AuthorGroup[];
+}
+
+export interface AuthorGroup {
+  author: string;
+  file_count: number;
+  total_size: number;
+  files: MediaFile[];
+}
+
+export interface MediaFile {
+  path: string;
+  file_name: string;
+  size_bytes: number;
+  media_type: "image" | "audio" | "video" | "ebook" | "unknown";
+  author: string;
+  modified_at: string;
+  checked: boolean;
+}
+
+export type ClassifyAction = "move_to_author_folder" | "rename";
+
+export interface ClassifyExecuteRequest {
+  task_id: string;
+  action: ClassifyAction;
+  rename_template: string | null;
+  checked_paths: string[];
+}
+
+export interface ClassifyPreviewItem {
+  source_path: string;
+  target_path: string;
+  action_desc: string;
+}
+
+export interface ClassifyPreviewResult {
+  task_id: string;
+  action: ClassifyAction;
+  items: ClassifyPreviewItem[];
+  total: number;
+}
+
 // ========== 日志与撤销 ==========
 
 export interface ExecutionLog {

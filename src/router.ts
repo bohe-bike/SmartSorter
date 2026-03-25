@@ -14,6 +14,11 @@ const router = createRouter({
       component: () => import("./views/DuplicateView.vue"),
     },
     {
+      path: "/media-classify",
+      name: "media-classify",
+      component: () => import("./views/MediaClassifyView.vue"),
+    },
+    {
       path: "/history",
       name: "history",
       component: () => import("./views/HistoryView.vue"),

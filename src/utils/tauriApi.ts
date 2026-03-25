@@ -5,6 +5,9 @@ import type {
   PreviewResult,
   RuleSet,
   DuplicateResult,
+  MediaClassifyResult,
+  ClassifyExecuteRequest,
+  ClassifyPreviewResult,
   ExecutionLog,
   ProgressEvent,
 } from "../types";
@@ -53,6 +56,30 @@ export async function scanDuplicates(
   recursive: boolean,
 ): Promise<DuplicateResult> {
   return invoke<DuplicateResult>("scan_duplicates", { paths, recursive });
+}
+
+// ========== 媒体作者归类 ==========
+
+export async function scanMediaAuthors(
+  paths: string[],
+  recursive: boolean,
+  mediaTypes: string[],
+): Promise<MediaClassifyResult> {
+  return invoke<MediaClassifyResult>("scan_media_authors", {
+    paths,
+    recursive,
+    mediaTypes,
+  });
+}
+
+export async function previewMediaClassify(
+  request: ClassifyExecuteRequest,
+): Promise<ClassifyPreviewResult> {
+  return invoke<ClassifyPreviewResult>("preview_media_classify", { request });
+}
+
+export async function executeMediaClassify(taskId: string): Promise<string> {
+  return invoke<string>("execute_media_classify", { taskId });
 }
 
 // ========== 历史日志 ==========

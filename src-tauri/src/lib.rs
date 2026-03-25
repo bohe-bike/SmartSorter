@@ -9,6 +9,7 @@ use commands::{
     execute_commands::{execute_task, undo_task},
     duplicate_commands::scan_duplicates,
     history_commands::load_history,
+    media_commands::{scan_media_authors, preview_media_classify, execute_media_classify},
 };
 
 #[tauri::command]
@@ -32,6 +33,9 @@ pub fn run() {
             execute_task,
             undo_task,
             scan_duplicates,
+            scan_media_authors,
+            preview_media_classify,
+            execute_media_classify,
             load_history,
             pick_folder,
         ])
