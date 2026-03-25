@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ref, watch } from "vue";
+import { onMounted, ref, watch } from "vue";
+import { getVersion } from "@tauri-apps/api/app";
 
 const theme = ref<"system" | "light" | "dark">(
   (localStorage.getItem("ss-theme") as any) || "system",
@@ -8,6 +9,7 @@ const defaultConflict = ref(localStorage.getItem("ss-conflict") || "skip");
 const confirmDelete = ref(
   localStorage.getItem("ss-confirm-delete") !== "false",
 );
+const appVersion = ref("-");
 
 watch(theme, (v) => {
   localStorage.setItem("ss-theme", v);
@@ -32,6 +34,14 @@ function applyTheme(t: string) {
 
 // 初始化
 applyTheme(theme.value);
+
+onMounted(async () => {
+  try {
+    appVersion.value = await getVersion();
+  } catch {
+    appVersion.value = "dev";
+  }
+});
 </script>
 
 <template>
@@ -72,7 +82,7 @@ applyTheme(theme.value);
     <section class="settings-group">
       <h3>关于</h3>
       <div class="about-info">
-        <p><strong>SmartSorter</strong> v1.3.0</p>
+        <p><strong>SmartSorter</strong> v{{ appVersion }}</p>
         <p>桌面端文件智能整理工具</p>
         <p class="tech">Tauri 2 + Vue 3 + Rust</p>
       </div>

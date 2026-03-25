@@ -1,16 +1,18 @@
 <#
 .SYNOPSIS
-  SmartSorter 发布脚本 — 编译可执行文件、同步版本号、提交代码、打 Git Tag
+  SmartSorter 发布脚本 — 同步版本号、提交代码、打 Git Tag（GitHub Actions 负责构建）
 
 .DESCRIPTION
-  用法：.\scripts\release.ps1 -Version "1.1.0" [-Message "发布说明"] [-Push] [-SkipBuild]
+  用法：.\scripts\release.ps1 -Version "1.1.0" [-Message "发布说明"] [-Push] [-LocalBuild]
   
-  执行步骤：
+  默认执行步骤（推荐，CI 构建）：
   1. 更新 package.json、Cargo.toml、tauri.conf.json 中的版本号
-  2. 编译前端 + Tauri 生产版本
-  3. git add + commit
-  4. 创建 git tag (v1.1.0)
-  5. 可选推送到远程（push tag 后 GitHub Actions 会自动创建 Release 并上传产物）
+  2. git add + commit
+  3. 创建 git tag (v1.1.0)
+  4. 可选推送到远程（push tag 后 GitHub Actions 会自动创建 Release 并上传产物）
+
+  可选步骤：
+  - 使用 -LocalBuild 时，本地先执行前端构建和 Tauri 打包，用于发布前自检。
 
 .PARAMETER Version
   目标版本号，如 "1.1.0"（不带 v 前缀）
@@ -21,8 +23,8 @@
 .PARAMETER Push
   是否自动推送到远程（默认 $false）
 
-.PARAMETER SkipBuild
-  跳过编译步骤（仅更新版本号和打 tag）
+.PARAMETER LocalBuild
+  是否在本地先构建（默认 $false；推荐交给 GitHub Actions 构建）
 #>
 param(
     [Parameter(Mandatory = $true)]
@@ -32,7 +34,7 @@ param(
 
     [switch]$Push = $false,
 
-    [switch]$SkipBuild = $false
+    [switch]$LocalBuild = $false
 )
 
 $ErrorActionPreference = "Stop"
@@ -83,14 +85,14 @@ $tauri = Get-Content $tauriPath -Raw
 $tauri = $tauri -replace '"version"\s*:\s*"[^"]*"', "`"version`": `"$Version`""
 Set-Content -Path $tauriPath -Value $tauri -NoNewline -Encoding UTF8
 
-# ---- 4. 编译 ----
-if (-not $SkipBuild) {
-    Write-Host "`n[4/7] 编译前端 ..." -ForegroundColor Yellow
+# ---- 4. 可选本地编译 ----
+if ($LocalBuild) {
+  Write-Host "`n[4/7] 本地构建前端 ..." -ForegroundColor Yellow
     Push-Location $root
     pnpm build
     if ($LASTEXITCODE -ne 0) { Write-Error "前端编译失败"; exit 1 }
 
-    Write-Host "[5/7] 编译 Tauri 生产版本 ..." -ForegroundColor Yellow
+  Write-Host "[5/7] 本地构建 Tauri 生产版本 ..." -ForegroundColor Yellow
     Push-Location (Join-Path $root "src-tauri")
     cargo tauri build
     Pop-Location
@@ -108,7 +110,7 @@ if (-not $SkipBuild) {
     if ($msi)  { Write-Host "  MSI:  $($msi.FullName)" }
     if ($nsis) { Write-Host "  NSIS: $($nsis.FullName)" }
 } else {
-    Write-Host "`n[4/7] 跳过编译 (SkipBuild)" -ForegroundColor DarkGray
+    Write-Host "`n[4/7] 跳过本地构建，交给 GitHub Actions 编译" -ForegroundColor DarkGray
 }
 
 # ---- 5. Git commit ----
