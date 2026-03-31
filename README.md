@@ -1,6 +1,6 @@
 # 📁 SmartSorter
 
-**桌面端文件智能整理工具** — 安全、高效地完成海量文件的重命名、去重与自动归类。
+**桌面端文件智能整理工具** — 安全、高效地完成海量文件的重命名、去重、媒体归类与自动整理。
 
 基于 Tauri 2 + Vue 3 + Rust 构建，面向本地硬盘及 NAS 用户，提供现代化极简 UI 与「整理前强制预览」机制。
 
@@ -9,25 +9,26 @@
 - **可视化规则配置** — 零代码拖拽/下拉组合 IF-THEN 整理逻辑，支持预设方案一键加载
 - **批量文件重命名** — 查找替换、前后缀管理、智能序号编排
 - **智能归类路由** — 魔法变量动态目录（`{extension}/{created_year}/`），自动创建层级
-- **重复文件检测** — 文件大小初筛 + SHA-256 哈希复核，分组可视化清理
+- **重复文件检测与清理** — 文件大小初筛 + SHA-256 哈希复核，分组可视化，支持批量删除
+- **媒体智能归类** — 从文件名和媒体元数据（Artist / Album / Composer 等）提取关键字，自动合并包含关系，按 `关键字-主题.扩展名` 格式归类重命名，执行后自动清理空文件夹
 - **整理前预览** — 内存虚拟执行，红绿 Diff 对比，支持逐文件勾选干预
 - **日志与一键撤销** — 操作映射快照，一键还原，失败原因可追溯
 
 ## 🏗️ 技术栈
 
-| 层   | 技术                      | 职责                                             |
-| ---- | ------------------------- | ------------------------------------------------ |
-| 前端 | Vue 3 + TypeScript + Vite | UI 渲染、状态管理 (Pinia)、路由                  |
-| 后端 | Rust + Tauri 2            | 文件扫描 (walkdir)、规则引擎、安全 I/O、哈希计算 |
-| 通信 | Tauri IPC                 | invoke 请求/响应 + Event 流式进度推送            |
+| 层   | 技术                      | 职责                                                                            |
+| ---- | ------------------------- | ------------------------------------------------------------------------------- |
+| 前端 | Vue 3 + TypeScript + Vite | UI 渲染、状态管理 (Pinia)、路由                                                 |
+| 后端 | Rust + Tauri 2            | 文件扫描 (walkdir)、规则引擎、安全 I/O、哈希计算、媒体元数据提取 (lofty / exif) |
+| 通信 | Tauri IPC                 | invoke 请求/响应 + Event 流式进度推送                                           |
 
 ## 📂 项目结构
 
 ```
 SmartSorter/
 ├── src/                          # Vue 3 前端
-│   ├── components/               # UI 组件（Sidebar 等）
-│   ├── views/                    # 页面视图（整理/去重/历史/设置）
+│   ├── components/               # UI 组件（Sidebar / RuleBuilder / PreviewTree）
+│   ├── views/                    # 页面视图（整理/去重/归类/历史/设置）
 │   ├── stores/                   # Pinia 状态管理
 │   ├── types/                    # TypeScript 类型定义
 │   ├── utils/                    # Tauri API 封装
@@ -37,14 +38,20 @@ SmartSorter/
 ├── src-tauri/                    # Rust 后端
 │   ├── src/
 │   │   ├── commands/             # Tauri Command（API 层）
-│   │   ├── models/               # 数据模型（规则/预览/日志）
-│   │   ├── engine/               # 核心引擎（扫描/匹配/执行/哈希/撤销）
+│   │   │   ├── rule_commands.rs   #   规则 CRUD
+│   │   │   ├── preview_commands.rs#   分析预览
+│   │   │   ├── execute_commands.rs#   物理执行
+│   │   │   ├── duplicate_commands.rs# 去重扫描与删除
+│   │   │   ├── media_commands.rs  #   媒体归类扫描/预览/执行
+│   │   │   └── history_commands.rs#   日志与撤销
+│   │   ├── models/               # 数据模型（规则/预览/日志/媒体归类）
+│   │   ├── engine/               # 核心引擎（扫描/匹配/执行/哈希/撤销/元数据）
 │   │   ├── storage/              # 本地持久化
 │   │   ├── lib.rs                # 模块注册 & Tauri 启动
 │   │   └── main.rs               # Windows 入口
 │   ├── Cargo.toml
 │   └── tauri.conf.json
-├── doc/                          # 产品需求 & 技术设计文档
+├── doc/                          # 产品需求 & 技术设计 & 使用说明文档
 ├── index.html
 ├── package.json
 ├── vite.config.ts
@@ -69,8 +76,9 @@ pnpm install
 # 开发模式（前端热重载 + Rust 自动重编译）
 pnpm tauri dev
 
-# 构建生产包（.msi 安装包）
-pnpm tauri build
+# 构建生产包
+pnpm tauri build              # 含 NSIS 安装包
+pnpm tauri build --no-bundle  # 仅生成 .exe
 ```
 
 ### 其他命令
