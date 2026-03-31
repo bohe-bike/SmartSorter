@@ -20,6 +20,15 @@ pub enum MediaType {
     Ebook,
 }
 
+/// 从文件中提取到的所有元数据字段
+#[derive(Debug, Clone, Default)]
+pub struct MediaMetadata {
+    pub artist: Option<String>,
+    pub album_artist: Option<String>,
+    pub album: Option<String>,
+    pub composer: Option<String>,
+}
+
 pub fn get_media_type(path: &Path) -> Option<MediaType> {
     let ext = path.extension()?.to_string_lossy().to_ascii_lowercase();
     match ext.as_str() {
@@ -40,14 +49,35 @@ pub fn media_type_name(media_type: MediaType) -> &'static str {
     }
 }
 
+#[allow(dead_code)]
 pub fn extract_author(path: &Path) -> Option<String> {
     match get_media_type(path)? {
-        MediaType::Image => extract_image_author(path),
-        MediaType::Audio => extract_tagged_media_author(path),
-        MediaType::Video => extract_tagged_media_author(path),
-        MediaType::Ebook => extract_ebook_author(path),
+        MediaType::Image => extract_image_author(path).and_then(normalize_author),
+        MediaType::Audio | MediaType::Video => extract_tagged_media_all(path).artist,
+        MediaType::Ebook => extract_ebook_author(path).and_then(normalize_author),
     }
-    .and_then(normalize_author)
+}
+
+/// 提取文件的所有元数据字段（artist, album_artist, album, composer）
+pub fn extract_all_metadata(path: &Path) -> MediaMetadata {
+    match get_media_type(path) {
+        Some(MediaType::Image) => {
+            let artist = extract_image_author(path).and_then(normalize_author);
+            MediaMetadata {
+                artist,
+                ..Default::default()
+            }
+        }
+        Some(MediaType::Audio) | Some(MediaType::Video) => extract_tagged_media_all(path),
+        Some(MediaType::Ebook) => {
+            let artist = extract_ebook_author(path).and_then(normalize_author);
+            MediaMetadata {
+                artist,
+                ..Default::default()
+            }
+        }
+        None => MediaMetadata::default(),
+    }
 }
 
 pub fn media_type_label(path: &Path) -> Option<&'static str> {
@@ -83,36 +113,62 @@ fn extract_image_author(path: &Path) -> Option<String> {
     }
 }
 
-fn extract_tagged_media_author(path: &Path) -> Option<String> {
-    let tagged = Probe::open(path)
-        .ok()?
-        .options(ParseOptions::new())
-        .read()
-        .ok()?;
+/// 提取音频/视频文件的所有元数据字段
+fn extract_tagged_media_all(path: &Path) -> MediaMetadata {
+    let tagged = match Probe::open(path)
+        .ok()
+        .and_then(|p| p.options(ParseOptions::new()).read().ok())
+    {
+        Some(t) => t,
+        None => return MediaMetadata::default(),
+    };
+
+    let mut meta = MediaMetadata::default();
 
     for tag in tagged.tags() {
-        if let Some(text) = tag.artist() {
-            if !text.trim().is_empty() {
-                return Some(text.to_string());
+        if meta.artist.is_none() {
+            if let Some(text) = tag.artist() {
+                let s = text.to_string();
+                if !s.trim().is_empty() {
+                    meta.artist = normalize_author(s);
+                }
             }
         }
-        if let Some(text) = tag.get_string(&lofty::tag::ItemKey::TrackArtist) {
-            if !text.trim().is_empty() {
-                return Some(text.to_string());
+        if meta.artist.is_none() {
+            if let Some(text) = tag.get_string(&lofty::tag::ItemKey::TrackArtist) {
+                let s = text.to_string();
+                if !s.trim().is_empty() {
+                    meta.artist = normalize_author(s);
+                }
             }
         }
-        if let Some(text) = tag.get_string(&lofty::tag::ItemKey::AlbumArtist) {
-            if !text.trim().is_empty() {
-                return Some(text.to_string());
+        if meta.album_artist.is_none() {
+            if let Some(text) = tag.get_string(&lofty::tag::ItemKey::AlbumArtist) {
+                let s = text.to_string();
+                if !s.trim().is_empty() {
+                    meta.album_artist = normalize_author(s);
+                }
+            }
+        }
+        if meta.album.is_none() {
+            if let Some(text) = tag.album() {
+                let s = text.to_string();
+                if !s.trim().is_empty() {
+                    meta.album = normalize_author(s);
+                }
+            }
+        }
+        if meta.composer.is_none() {
+            if let Some(text) = tag.get_string(&lofty::tag::ItemKey::Composer) {
+                let s = text.to_string();
+                if !s.trim().is_empty() {
+                    meta.composer = normalize_author(s);
+                }
             }
         }
     }
 
-    tagged.primary_tag().and_then(|tag| {
-        tag.artist()
-            .map(|text| text.to_string())
-            .filter(|text| !text.trim().is_empty())
-    })
+    meta
 }
 
 fn extract_ebook_author(path: &Path) -> Option<String> {

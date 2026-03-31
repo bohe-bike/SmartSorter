@@ -58,17 +58,25 @@ export async function scanDuplicates(
   return invoke<DuplicateResult>("scan_duplicates", { paths, recursive });
 }
 
-// ========== 媒体作者归类 ==========
+export async function deleteDuplicates(
+  pathsToDelete: string[],
+): Promise<string> {
+  return invoke<string>("delete_duplicates", { pathsToDelete });
+}
+
+// ========== 媒体归类 ==========
 
 export async function scanMediaAuthors(
   paths: string[],
   recursive: boolean,
   mediaTypes: string[],
+  keywordSources: string[],
 ): Promise<MediaClassifyResult> {
   return invoke<MediaClassifyResult>("scan_media_authors", {
     paths,
     recursive,
     mediaTypes,
+    keywordSources,
   });
 }
 

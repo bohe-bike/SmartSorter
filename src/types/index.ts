@@ -194,18 +194,26 @@ export interface DuplicateFile {
   keep: boolean;
 }
 
-// ========== 媒体作者归类 ==========
+// ========== 媒体归类 ==========
 
 export interface MediaClassifyResult {
   task_id: string;
   scanned_count: number;
-  total_authors: number;
-  no_author_count: number;
-  groups: AuthorGroup[];
+  total_keywords: number;
+  no_match_count: number;
+  keywords: KeywordInfo[];
+  groups: KeywordGroup[];
 }
 
-export interface AuthorGroup {
-  author: string;
+export interface KeywordInfo {
+  keyword: string;
+  source: string;
+  merged_from: string[];
+  file_count: number;
+}
+
+export interface KeywordGroup {
+  keyword: string;
   file_count: number;
   total_size: number;
   files: MediaFile[];
@@ -216,18 +224,14 @@ export interface MediaFile {
   file_name: string;
   size_bytes: number;
   media_type: "image" | "audio" | "video" | "ebook" | "unknown";
-  author: string;
+  matched_keywords: string[];
   modified_at: string;
   checked: boolean;
 }
 
-export type ClassifyAction = "move_to_author_folder" | "rename";
-
 export interface ClassifyExecuteRequest {
   task_id: string;
-  action: ClassifyAction;
-  rename_template: string | null;
-  checked_paths: string[];
+  keyword_assignments: Record<string, string>;
 }
 
 export interface ClassifyPreviewItem {
@@ -238,7 +242,6 @@ export interface ClassifyPreviewItem {
 
 export interface ClassifyPreviewResult {
   task_id: string;
-  action: ClassifyAction;
   items: ClassifyPreviewItem[];
   total: number;
 }

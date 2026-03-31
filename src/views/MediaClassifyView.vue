@@ -9,34 +9,46 @@ import {
   scanMediaAuthors,
 } from "../utils/tauriApi";
 import type {
-  AuthorGroup,
-  ClassifyAction,
+  KeywordGroup,
   ClassifyPreviewResult,
   MediaClassifyResult,
   ProgressEvent,
 } from "../types";
 
 const sourcePaths = ref<string[]>([]);
-const recursive = ref(true);
+const recursive = ref(false);
 const mediaTypeOptions = ref([
   { key: "image", label: "图片", checked: true },
   { key: "audio", label: "音频", checked: true },
   { key: "video", label: "视频", checked: true },
   { key: "ebook", label: "电子书", checked: true },
 ]);
-const action = ref<ClassifyAction>("move_to_author_folder");
-const renameTemplate = ref("{author} - {filename}");
+const keywordSourceOptions = ref([
+  { key: "folder_name", label: "子文件夹名称", checked: true },
+  { key: "artist", label: "作者/艺术家", checked: true },
+  { key: "album_artist", label: "专辑艺术家", checked: true },
+  { key: "album", label: "专辑名", checked: true },
+  { key: "composer", label: "作曲家", checked: true },
+]);
 const scanning = ref(false);
 const executing = ref(false);
 const result = ref<MediaClassifyResult | null>(null);
 const preview = ref<ClassifyPreviewResult | null>(null);
 const executionMessage = ref("");
 const progress = ref({ current: 0, total: 0, currentFile: "", phase: "" });
+// 用户对多关键字匹配文件的手动选择：文件路径 → 选定关键字
+const keywordAssignments = ref<Record<string, string>>({});
 
 let unlistenProgress: (() => void) | null = null;
 
 const selectedMediaTypes = computed(() =>
   mediaTypeOptions.value.filter((item) => item.checked).map((item) => item.key),
+);
+
+const selectedKeywordSources = computed(() =>
+  keywordSourceOptions.value
+    .filter((item) => item.checked)
+    .map((item) => item.key),
 );
 
 const checkedPaths = computed(() => {
@@ -58,6 +70,30 @@ const totalSelectedSize = computed(() => {
         .reduce((groupSum, file) => groupSum + file.size_bytes, 0)
     );
   }, 0);
+});
+
+// 多关键字匹配的文件列表
+const multiMatchFiles = computed(() => {
+  if (!result.value) return [];
+  const files: { path: string; fileName: string; keywords: string[] }[] = [];
+  for (const group of result.value.groups) {
+    for (const file of group.files) {
+      if (file.matched_keywords.length > 1) {
+        files.push({
+          path: file.path,
+          fileName: file.file_name,
+          keywords: file.matched_keywords,
+        });
+      }
+    }
+  }
+  return files;
+});
+
+// 合并信息
+const mergedKeywords = computed(() => {
+  if (!result.value) return [];
+  return result.value.keywords.filter((k) => k.merged_from.length > 0);
 });
 
 async function addFolder() {
@@ -92,13 +128,18 @@ async function prepareProgressListener() {
 }
 
 async function runScan() {
-  if (sourcePaths.value.length === 0 || selectedMediaTypes.value.length === 0) {
+  if (
+    sourcePaths.value.length === 0 ||
+    selectedMediaTypes.value.length === 0 ||
+    selectedKeywordSources.value.length === 0
+  ) {
     return;
   }
 
   scanning.value = true;
   preview.value = null;
   executionMessage.value = "";
+  keywordAssignments.value = {};
   resetProgress("extracting");
   await prepareProgressListener();
 
@@ -107,6 +148,7 @@ async function runScan() {
       sourcePaths.value,
       recursive.value,
       selectedMediaTypes.value,
+      selectedKeywordSources.value,
     );
   } catch (error) {
     alert("扫描失败: " + error);
@@ -116,14 +158,18 @@ async function runScan() {
   }
 }
 
-function toggleGroup(group: AuthorGroup, checked: boolean) {
+function toggleGroup(group: KeywordGroup, checked: boolean) {
   group.files.forEach((file) => {
     file.checked = checked;
   });
 }
 
-function groupCheckedCount(group: AuthorGroup): number {
+function groupCheckedCount(group: KeywordGroup): number {
   return group.files.filter((file) => file.checked).length;
+}
+
+function assignKeyword(filePath: string, keyword: string) {
+  keywordAssignments.value[filePath] = keyword;
 }
 
 async function generatePreview() {
@@ -131,12 +177,20 @@ async function generatePreview() {
     return;
   }
 
+  // 构建 keyword_assignments：所有选中文件都需要有一个关键字
+  const assignments: Record<string, string> = { ...keywordAssignments.value };
+  for (const group of result.value.groups) {
+    for (const file of group.files) {
+      if (file.checked && !assignments[file.path]) {
+        assignments[file.path] = group.keyword;
+      }
+    }
+  }
+
   try {
     preview.value = await previewMediaClassify({
       task_id: result.value.task_id,
-      action: action.value,
-      rename_template: action.value === "rename" ? renameTemplate.value : null,
-      checked_paths: checkedPaths.value,
+      keyword_assignments: assignments,
     });
     executionMessage.value = "";
   } catch (error) {
@@ -157,7 +211,6 @@ async function executeChanges() {
     executionMessage.value = await executeMediaClassify(preview.value.task_id);
     preview.value = null;
     result.value = null;
-    sourcePaths.value = [];
   } catch (error) {
     executionMessage.value = String(error);
     alert("执行失败: " + error);
@@ -206,8 +259,8 @@ function mediaIcon(type: string): string {
 <template>
   <div class="media-classify-view">
     <div class="header">
-      <h2>媒体作者归类</h2>
-      <span class="header-tip">按作者批量归类并支持预览后执行</span>
+      <h2>媒体归类</h2>
+      <span class="header-tip">按关键字批量归类，支持预览后执行</span>
     </div>
 
     <section class="source-section">
@@ -241,16 +294,28 @@ function mediaIcon(type: string): string {
         </label>
       </div>
 
+      <div class="filter-row">
+        <span class="filter-label">关键字来源</span>
+        <label
+          v-for="item in keywordSourceOptions"
+          :key="item.key"
+          class="filter-chip"
+        >
+          <input v-model="item.checked" type="checkbox" /> {{ item.label }}
+        </label>
+      </div>
+
       <button
         class="btn-scan"
         :disabled="
           sourcePaths.length === 0 ||
           scanning ||
-          selectedMediaTypes.length === 0
+          selectedMediaTypes.length === 0 ||
+          selectedKeywordSources.length === 0
         "
         @click="runScan"
       >
-        {{ scanning ? "扫描中…" : "开始扫描作者" }}
+        {{ scanning ? "扫描中…" : "开始扫描" }}
       </button>
 
       <ProgressBar
@@ -269,16 +334,53 @@ function mediaIcon(type: string): string {
           <span class="stat-label">扫描文件</span>
         </div>
         <div class="stat-card">
-          <span class="stat-value highlight">{{ result.total_authors }}</span>
-          <span class="stat-label">作者分组</span>
+          <span class="stat-value highlight">{{ result.total_keywords }}</span>
+          <span class="stat-label">关键字分组</span>
         </div>
         <div class="stat-card">
-          <span class="stat-value warning">{{ result.no_author_count }}</span>
-          <span class="stat-label">未识别作者</span>
+          <span class="stat-value warning">{{ result.no_match_count }}</span>
+          <span class="stat-label">未匹配</span>
         </div>
         <div class="stat-card">
           <span class="stat-value">{{ totalSelected }}</span>
           <span class="stat-label">已选文件</span>
+        </div>
+      </div>
+
+      <!-- 合并提示 -->
+      <div v-if="mergedKeywords.length > 0" class="merge-notice">
+        <span class="merge-icon">🔗</span>
+        <div class="merge-text">
+          <div
+            v-for="mk in mergedKeywords"
+            :key="mk.keyword"
+            class="merge-line"
+          >
+            「{{ mk.merged_from.join("、") }}」已合并到「{{ mk.keyword }}」
+          </div>
+        </div>
+      </div>
+
+      <!-- 多关键字匹配提示 -->
+      <div v-if="multiMatchFiles.length > 0" class="multi-match-section">
+        <div class="panel-title">⚠ 多关键字匹配文件（请选择归类目标）</div>
+        <div
+          v-for="mf in multiMatchFiles"
+          :key="mf.path"
+          class="multi-match-row"
+        >
+          <span class="multi-match-name">{{ mf.fileName }}</span>
+          <select
+            class="keyword-select"
+            :value="keywordAssignments[mf.path] || mf.keywords[0]"
+            @change="
+              assignKeyword(mf.path, ($event.target as HTMLSelectElement).value)
+            "
+          >
+            <option v-for="kw in mf.keywords" :key="kw" :value="kw">
+              {{ kw }}
+            </option>
+          </select>
         </div>
       </div>
 
@@ -287,7 +389,8 @@ function mediaIcon(type: string): string {
           <div>
             <div class="panel-title">操作设置</div>
             <div class="panel-subtitle">
-              当前已选 {{ totalSelected }} 个文件，约
+              移动到关键字文件夹并重命名为「关键字-主题.后缀」，已选
+              {{ totalSelected }} 个文件，约
               {{ formatSize(totalSelectedSize) }}
             </div>
           </div>
@@ -300,32 +403,9 @@ function mediaIcon(type: string): string {
           </button>
         </div>
 
-        <div class="action-options">
-          <label class="action-option">
-            <input
-              v-model="action"
-              type="radio"
-              value="move_to_author_folder"
-            />
-            移动到作者子文件夹
-          </label>
-          <label class="action-option">
-            <input v-model="action" type="radio" value="rename" />
-            批量重命名
-          </label>
-        </div>
-
-        <div v-if="action === 'rename'" class="rename-box">
-          <label class="rename-label">命名模板</label>
-          <input v-model="renameTemplate" class="rename-input" />
-          <div class="rename-tip">
-            支持变量：{{ "{author}" }}、{{ "{filename}" }}、{{ "{extension}" }}
-          </div>
-        </div>
-
         <div v-if="preview" class="preview-box">
           <div class="preview-head">
-            <span class="panel-title">预览结果</span>
+            <span class="panel-title">预览结果（{{ preview.total }} 项）</span>
             <button
               class="btn-execute"
               :disabled="executing || preview.total === 0"
@@ -348,15 +428,12 @@ function mediaIcon(type: string): string {
           </div>
         </div>
 
-        <div v-if="result.no_author_count > 0" class="message-box">
+        <div v-if="result.no_match_count > 0" class="message-box">
           有
-          {{
-            result.no_author_count
-          }}
-          个文件未识别到作者，已保持原位置不参与归类。
+          {{ result.no_match_count }} 个文件未匹配到任何关键字，将保持原位不动。
         </div>
 
-        <div v-if="executionMessage" class="message-box">
+        <div v-if="executionMessage" class="message-box success-msg">
           {{ executionMessage }}
         </div>
       </div>
@@ -368,12 +445,12 @@ function mediaIcon(type: string): string {
       <div v-else class="group-list">
         <div
           v-for="group in result.groups"
-          :key="group.author"
+          :key="group.keyword"
           class="author-group"
         >
           <div class="group-head">
             <div>
-              <div class="group-author">{{ group.author }}</div>
+              <div class="group-author">{{ group.keyword }}</div>
               <div class="group-meta">
                 {{ group.file_count }} 个文件 ·
                 {{ formatSize(group.total_size) }}
@@ -397,10 +474,14 @@ function mediaIcon(type: string): string {
               v-for="file in group.files"
               :key="file.path"
               class="file-row"
+              :class="{ 'multi-match': file.matched_keywords.length > 1 }"
             >
               <input v-model="file.checked" type="checkbox" />
               <span class="file-type">{{ mediaIcon(file.media_type) }}</span>
               <span class="file-name">{{ file.file_name }}</span>
+              <span v-if="file.matched_keywords.length > 1" class="match-badge">
+                {{ file.matched_keywords.length }}匹配
+              </span>
               <span class="file-date">{{ formatDate(file.modified_at) }}</span>
               <span class="file-path" :title="file.path">{{ file.path }}</span>
             </label>
@@ -410,7 +491,7 @@ function mediaIcon(type: string): string {
     </section>
 
     <div v-else class="placeholder">
-      选择目录并扫描后，按作者查看媒体文件分组
+      选择目录并扫描后，按关键字查看媒体文件分组
     </div>
   </div>
 </template>
@@ -471,7 +552,6 @@ function mediaIcon(type: string): string {
 
 .recursive-toggle,
 .filter-chip,
-.action-option,
 .file-row {
   display: flex;
   align-items: center;
@@ -564,6 +644,7 @@ function mediaIcon(type: string): string {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
+  margin-top: 8px;
 }
 
 .filter-row {
@@ -623,22 +704,6 @@ function mediaIcon(type: string): string {
 
 .warning {
   color: var(--color-warning);
-}
-
-.rename-box {
-  margin-top: 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.rename-input {
-  height: 36px;
-  border: 1px solid var(--color-border);
-  border-radius: 6px;
-  padding: 0 12px;
-  background: var(--color-bg);
-  color: var(--color-text);
 }
 
 .preview-box {
@@ -716,6 +781,85 @@ function mediaIcon(type: string): string {
   padding: 64px;
   text-align: center;
   color: var(--color-text-secondary);
+}
+
+/* 合并提示 */
+.merge-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 14px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  font-size: 12px;
+}
+
+.merge-icon {
+  font-size: 16px;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.merge-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.merge-line {
+  color: var(--color-text-secondary);
+}
+
+/* 多关键字匹配 */
+.multi-match-section {
+  background: var(--color-surface);
+  border: 1px solid var(--color-warning);
+  border-radius: 10px;
+  padding: 14px;
+}
+
+.multi-match-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0;
+}
+
+.multi-match-name {
+  flex: 1;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.keyword-select {
+  height: 28px;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  padding: 0 8px;
+  font-size: 12px;
+  background: var(--color-bg);
+  color: var(--color-text);
+  min-width: 100px;
+}
+
+.file-row.multi-match {
+  border-left: 3px solid var(--color-warning);
+}
+
+.match-badge {
+  flex-shrink: 0;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: rgba(221, 156, 0, 0.12);
+  color: var(--color-warning);
+}
+
+.success-msg {
+  border-left: 3px solid var(--color-success);
 }
 
 @media (max-width: 900px) {

@@ -1,23 +1,21 @@
 mod commands;
-mod models;
 mod engine;
+mod models;
 mod storage;
 
 use commands::{
-    rule_commands::{load_rule_sets, save_rule_set, delete_rule_set},
-    preview_commands::analyze_preview,
+    duplicate_commands::{delete_duplicates, scan_duplicates},
     execute_commands::{execute_task, undo_task},
-    duplicate_commands::scan_duplicates,
     history_commands::load_history,
-    media_commands::{scan_media_authors, preview_media_classify, execute_media_classify},
+    media_commands::{execute_media_classify, preview_media_classify, scan_media_authors},
+    preview_commands::analyze_preview,
+    rule_commands::{delete_rule_set, load_rule_sets, save_rule_set},
 };
 
 #[tauri::command]
 fn pick_folder() -> Result<Option<String>, String> {
     use std::path::PathBuf;
-    let result = rfd::FileDialog::new()
-        .set_title("选择文件夹")
-        .pick_folder();
+    let result = rfd::FileDialog::new().set_title("选择文件夹").pick_folder();
     Ok(result.map(|p: PathBuf| p.to_string_lossy().into_owned()))
 }
 
@@ -33,6 +31,7 @@ pub fn run() {
             execute_task,
             undo_task,
             scan_duplicates,
+            delete_duplicates,
             scan_media_authors,
             preview_media_classify,
             execute_media_classify,
