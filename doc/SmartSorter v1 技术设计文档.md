@@ -1,4 +1,4 @@
-# 🏗️ SmartSorter v1.0 技术设计文档
+# 🏗️ SmartSorter v1 技术设计文档
 
 **文档版本：** v1.0
 **创建日期：** 2026-03-23
@@ -86,14 +86,14 @@
 
 #### 1.1.3 条件字段与操作符枚举
 
-| `field` 字段  | 说明                   | 适用 `operator`                                                           |
+| `field` 字段  | 说明                   | 适用`operator`                                                            |
 | ------------- | ---------------------- | ------------------------------------------------------------------------- |
 | `filename`    | 文件名（不含扩展名）   | `contains`, `not_contains`, `starts_with`, `ends_with`, `equals`, `regex` |
-| `extension`   | 扩展名（如 `png`）     | `equals`, `not_equals`, `in`, `not_in`                                    |
-| `full_name`   | 完整文件名（含扩展名） | 同 `filename`                                                             |
+| `extension`   | 扩展名（如`png`）      | `equals`, `not_equals`, `in`, `not_in`                                    |
+| `full_name`   | 完整文件名（含扩展名） | 同`filename`                                                              |
 | `size_bytes`  | 文件大小（字节）       | `gt`, `gte`, `lt`, `lte`, `between`                                       |
 | `created_at`  | 创建时间               | `before`, `after`, `between`, `within_days`                               |
-| `modified_at` | 修改时间               | 同 `created_at`                                                           |
+| `modified_at` | 修改时间               | 同`created_at`                                                            |
 | `parent_dir`  | 所在父目录名           | `contains`, `equals`, `starts_with`                                       |
 
 #### 1.1.4 动作类型与参数枚举
@@ -106,7 +106,7 @@
 |             | `suffix` 模式: `{ text: "_备份" }`                                                                                   |
 |             | `sequence` 模式: `{ template: "{original}_{seq}", start: 1, padding: 3, sort_by: "modified_at", sort_order: "asc" }` |
 | `move`      | `dest_pattern`: 目标路径模板, `conflict_strategy`: 冲突策略                                                          |
-| `copy`      | 同 `move`                                                                                                            |
+| `copy`      | 同`move`                                                                                                             |
 | `delete`    | `confirm_required`: `true`（强制二次确认）                                                                           |
 
 #### 1.1.5 魔法变量（路径模板可用）
@@ -276,9 +276,111 @@ Rust 内存计算后返回的完整 Diff 结果：
 
 ---
 
-### 1.4 操作日志与撤销 (Log & Undo)
+### 1.4 媒体智能归类 (Media Smart Classify)
 
-#### 1.4.1 执行日志 `ExecutionLog`
+#### 1.4.1 扫描结果 `MediaClassifyResult`
+
+```jsonc
+// Rust -> 前端: scan_media_authors 返回
+{
+  "task_id": "mc_20260323_170000",
+  "source_paths": ["D:\\媒体库"], // 用户选择的扫描源目录
+  "scanned_count": 500, // 扫描文件总数
+  "total_keywords": 12, // 提取到的关键字总数
+  "no_match_count": 30, // 未匹配任何关键字的文件数
+  "keywords": [
+    // 关键字信息列表
+    {
+      "keyword": "蝶子",
+      "source": "folder_name", // 关键字来源
+      "merged_from": ["小凛蝶子"], // 被合并的长关键字
+      "file_count": 45,
+    },
+  ],
+  "groups": [
+    // 按关键字分组的文件列表
+    {
+      "keyword": "蝶子",
+      "file_count": 45,
+      "total_size": 5368709120,
+      "files": [
+        {
+          "path": "D:\\媒体库\\蝶子\\作品001.mp4",
+          "file_name": "作品001.mp4",
+          "size_bytes": 104857600,
+          "media_type": "video",
+          "matched_keywords": ["蝶子"], // 该文件匹配到的所有关键字
+          "modified_at": "2025-06-15T08:00:00",
+          "checked": true,
+        },
+      ],
+    },
+  ],
+}
+```
+
+#### 1.4.2 关键字信息 `KeywordInfo`
+
+| 字段          | 类型       | 说明                                                                       |
+| ------------- | ---------- | -------------------------------------------------------------------------- |
+| `keyword`     | `String`   | 最终关键字（合并后的短关键字）                                             |
+| `source`      | `String`   | 来源类型：`folder_name` / `artist` / `album_artist` / `album` / `composer` |
+| `merged_from` | `String[]` | 因包含关系被合并的长关键字列表                                             |
+| `file_count`  | `u64`      | 匹配该关键字的文件数量                                                     |
+
+#### 1.4.3 关键字包含合并算法
+
+当关键字 A 包含关键字 B（如 "小凛蝶子" 包含 "蝶子"），则将 A 所匹配的文件合并给 B，A 不再作为独立关键字。合并规则：
+
+1. 按关键字长度升序排列
+2. 对于每个长关键字，检查是否存在更短的关键字被其包含
+3. 若找到包含关系，将长关键字标记为被合并，其文件归入短关键字组
+4. `merged_from` 字段记录被合并的原始关键字
+
+#### 1.4.4 归类预览请求 `ClassifyExecuteRequest`
+
+```jsonc
+// 前端 -> Rust: preview_media_classify / execute_media_classify
+{
+  "task_id": "mc_20260323_170000",
+  "keyword_assignments": {
+    // 文件路径 → 用户选定的关键字（仅多匹配文件需要）
+    "D:\\媒体库\\作品A.mp4": "蝶子",
+  },
+}
+```
+
+#### 1.4.5 归类预览结果 `ClassifyPreviewResult`
+
+```jsonc
+// Rust -> 前端: preview_media_classify 返回
+{
+  "task_id": "mc_20260323_170000",
+  "total": 45,
+  "items": [
+    {
+      "source_path": "D:\\媒体库\\蝶子\\作品001.mp4",
+      "target_path": "D:\\媒体库\\蝶子\\蝶子-作品001.mp4",
+      "action_desc": "移动 + 重命名",
+    },
+  ],
+}
+```
+
+#### 1.4.6 目标路径生成规则
+
+目标文件路径按以下规则生成：`{扫描根目录}/{关键字}/{关键字}-{主题}.{扩展名}`
+
+- **扫描根目录**：通过 `source_paths` 匹配文件路径前缀确定
+- **关键字**：用户最终确认的归属关键字
+- **主题**：从原文件名中去除关键字部分后的剩余文本，清理多余的分隔符
+- **分隔符**：关键字与主题之间使用 `-` 连接
+
+---
+
+### 1.5 操作日志与撤销 (Log & Undo)
+
+#### 1.5.1 执行日志 `ExecutionLog`
 
 ```jsonc
 {
@@ -501,6 +603,75 @@ pub struct Conflict {
     pub resolution: ConflictStrategy,
     pub resolved_path: String,
 }
+
+// ========== 媒体智能归类 ==========
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MediaClassifyResult {
+    pub task_id: String,
+    pub source_paths: Vec<String>,
+    pub scanned_count: u64,
+    pub total_keywords: u64,
+    pub no_match_count: u64,
+    pub keywords: Vec<KeywordInfo>,
+    pub groups: Vec<KeywordGroup>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeywordInfo {
+    pub keyword: String,
+    pub source: String,          // "folder_name" | "artist" | "album_artist" | "album" | "composer"
+    pub merged_from: Vec<String>,
+    pub file_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeywordGroup {
+    pub keyword: String,
+    pub file_count: u64,
+    pub total_size: u64,
+    pub files: Vec<MediaFile>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MediaFile {
+    pub path: String,
+    pub file_name: String,
+    pub size_bytes: u64,
+    pub media_type: String,
+    pub matched_keywords: Vec<String>,
+    pub modified_at: String,
+    pub checked: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClassifyExecuteRequest {
+    pub task_id: String,
+    pub keyword_assignments: HashMap<String, String>, // 文件路径 → 选定关键字
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClassifyPreviewItem {
+    pub source_path: String,
+    pub target_path: String,
+    pub action_desc: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClassifyPreviewResult {
+    pub task_id: String,
+    pub items: Vec<ClassifyPreviewItem>,
+    pub total: u64,
+}
+
+// ========== 媒体元数据 ==========
+
+pub struct MediaMetadata {
+    pub artist: Option<String>,
+    pub album_artist: Option<String>,
+    pub album: Option<String>,
+    pub composer: Option<String>,
+}
 ```
 
 ---
@@ -519,6 +690,8 @@ pub struct Conflict {
 │  📂 整理  │         ← 主工作区（根据左侧导航切换内容）           │
 │          │                                                      │
 │  🔍 去重  │                                                      │
+│          │                                                      │
+│  🎵 归类  │                                                      │
 │          │                                                      │
 │  📋 历史  │                                                      │
 │          │                                                      │
@@ -647,7 +820,45 @@ pub struct Conflict {
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### 2.6 历史与撤销页面
+### 2.6 媒体归类页面
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  选择扫描目录: [D:\媒体库             ] [📂] ☐ 递归子目录       │
+├─────────────────────────────────────────────────────────────────┤
+│  媒体类型: ☑图片 ☑音频 ☑视频 ☑电子书                           │
+│  关键字来源: ☑子文件夹名称 ☑作者/艺术家 ☑专辑艺术家            │
+│              ☑专辑名 ☑作曲家                                    │
+│                                              [🔍 开始扫描]      │
+├─────────────────────────────────────────────────────────────────┤
+│  📊 扫描 500 文件 | 提取 12 个关键字 | 未匹配 30 个文件         │
+│  📝 合并提示: "小凛蝶子" → 已合并到 "蝶子"                     │
+│━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━│
+│                                                                  │
+│  ▼ 蝶子 (45 个文件, 5.0 GB)                                    │
+│  ┌──────────────────────────────────────────────────────────┐   │
+│  │  作品001.mp4          120MB  [蝶子]                      │   │
+│  │  作品002.mp4          95MB   [蝶子]                      │   │
+│  │  多匹配作品.mp4       80MB   [蝶子▾] ← 下拉选择关键字    │   │
+│  └──────────────────────────────────────────────────────────┘   │
+│                                                                  │
+│  ▶ 作者B (30 个文件, 3.2 GB)                                    │
+│  ▶ 未匹配 (30 个文件)                                           │
+│  …                                                               │
+│                                                                  │
+│          [📋 生成预览]                                           │
+├─────────────────────────────────────────────────────────────────┤
+│  预览变更:                                                       │
+│  源路径                            →  目标路径                   │
+│  D:\媒体库\蝶子\作品001.mp4       →  D:\媒体库\蝶子\蝶子-作品…  │
+│  D:\媒体库\散文件\多匹配作品.mp4  →  D:\媒体库\蝶子\蝶子-多匹…  │
+│  …                                                               │
+│                                                                  │
+│              [🚀 执行归类]              进度: ████████░░ 80%     │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 2.7 历史与撤销页面
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -726,6 +937,7 @@ SmartSorter/
 │   ├── views/                       # 页面视图
 │   │   ├── WorkspaceView.vue        #   整理工作台
 │   │   ├── DuplicateView.vue        #   去重页面
+│   │   ├── MediaClassifyView.vue    #   媒体归类页面
 │   │   ├── HistoryView.vue          #   历史记录
 │   │   └── SettingsView.vue         #   设置页面
 │   ├── stores/                      # Pinia 状态管理
@@ -751,13 +963,15 @@ SmartSorter/
 │   │   │   ├── rule_commands.rs     #   规则 CRUD
 │   │   │   ├── preview_commands.rs  #   分析预览
 │   │   │   ├── execute_commands.rs  #   物理执行
-│   │   │   ├── duplicate_commands.rs#   去重扫描
+│   │   │   ├── duplicate_commands.rs#   去重扫描与删除
+│   │   │   ├── media_commands.rs    #   媒体归类扫描、预览与执行
 │   │   │   └── history_commands.rs  #   日志与撤销
 │   │   ├── models/                  # 数据模型（struct 定义）
 │   │   │   ├── mod.rs
 │   │   │   ├── rule.rs              #   Rule / RuleSet / Condition / Action
 │   │   │   ├── preview.rs           #   PreviewResult / PreviewItem
 │   │   │   ├── duplicate.rs         #   DuplicateResult / DuplicateGroup
+│   │   │   ├── media_classify.rs    #   MediaClassifyResult / KeywordGroup / MediaFile
 │   │   │   └── log.rs               #   ExecutionLog / Operation
 │   │   ├── engine/                  # 核心业务引擎
 │   │   │   ├── mod.rs
@@ -766,6 +980,7 @@ SmartSorter/
 │   │   │   ├── transformer.rs       #   重命名 / 路径计算
 │   │   │   ├── executor.rs          #   物理 I/O 执行器
 │   │   │   ├── hasher.rs            #   文件哈希计算
+│   │   │   ├── metadata.rs         #   媒体元数据提取（lofty / exif / lopdf）
 │   │   │   └── undo.rs              #   撤销引擎
 │   │   └── storage/                 # 本地持久化
 │   │       ├── mod.rs
@@ -802,6 +1017,11 @@ tokio = { version = "1", features = ["full"] }  # 异步运行时
 log = "0.4"
 env_logger = "0.11"
 thiserror = "2"                   # 错误处理
+lofty = "0.21"                    # 音频/视频标签提取（Artist, Album 等）
+kamadak-exif = "0.6"              # EXIF 元数据（图片）
+lopdf = "0.35"                    # PDF 元数据
+quick-xml = "0.37"                # XML 解析（EPUB/CBZ 元数据）
+zip = "2"                         # ZIP 归档读取（EPUB/CBZ 为 ZIP 格式）
 ```
 
 #### 前端 (package.json)
