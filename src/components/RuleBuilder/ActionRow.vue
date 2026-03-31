@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref, watch } from "vue";
 import type {
   Action,
   RenameAction,
@@ -86,25 +86,45 @@ function updateRoutePattern(val: string) {
   } as Action);
 }
 
-// 拆分 dest_pattern 为基路径和子目录
-const routeBase = computed(() => {
-  const p = (props.action as MoveAction).params.dest_pattern || "";
+// 拆分 dest_pattern 为基路径和子目录（使用 ref 避免用户输入时自动拆分）
+function splitPattern(pattern: string): { base: string; sub: string } {
+  const p = pattern || "";
   const sep =
     p.lastIndexOf("\\") >= 0 ? p.lastIndexOf("\\") : p.lastIndexOf("/");
-  return sep >= 0 ? p.substring(0, sep) : "";
-});
+  return {
+    base: sep >= 0 ? p.substring(0, sep) : "",
+    sub: sep >= 0 ? p.substring(sep + 1) : p,
+  };
+}
 
-const routeSub = computed(() => {
-  const p = (props.action as MoveAction).params.dest_pattern || "";
-  const sep =
-    p.lastIndexOf("\\") >= 0 ? p.lastIndexOf("\\") : p.lastIndexOf("/");
-  return sep >= 0 ? p.substring(sep + 1) : p;
-});
+const initSplit = splitPattern(
+  (props.action as MoveAction).params?.dest_pattern || "",
+);
+const routeBase = ref(initSplit.base);
+const routeSub = ref(initSplit.sub);
+
+// 仅当外部 prop 变化（如切换动作）时重新拆分，用户输入期间不触发
+let internalUpdate = false;
+watch(
+  () => (props.action as MoveAction).params?.dest_pattern,
+  (newVal) => {
+    if (internalUpdate) {
+      internalUpdate = false;
+      return;
+    }
+    const s = splitPattern(newVal || "");
+    routeBase.value = s.base;
+    routeSub.value = s.sub;
+  },
+);
 
 function buildAndEmitRoute(base: string, sub: string) {
+  routeBase.value = base;
+  routeSub.value = sub;
   const b = base.replace(/[\\/]+$/, "");
   const s = sub.replace(/^[\\/]+/, "");
   const combined = s ? `${b}\\${s}` : b;
+  internalUpdate = true;
   updateRoutePattern(combined);
 }
 

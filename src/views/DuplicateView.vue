@@ -1,12 +1,18 @@
 <script setup lang="ts">
 import { ref, computed, onUnmounted } from "vue";
-import { scanDuplicates, pickFolder, listenProgress } from "../utils/tauriApi";
+import {
+  scanDuplicates,
+  deleteDuplicates,
+  pickFolder,
+  listenProgress,
+} from "../utils/tauriApi";
 import ProgressBar from "../components/ProgressBar.vue";
 import type { DuplicateResult, DuplicateGroup, ProgressEvent } from "../types";
 
 const sourcePaths = ref<string[]>([]);
 const recursive = ref(true);
 const scanning = ref(false);
+const deleting = ref(false);
 const result = ref<DuplicateResult | null>(null);
 
 // 进度状态
@@ -106,6 +112,77 @@ function formatDate(iso: string): string {
     return iso;
   }
 }
+
+// 计算待删除文件路径
+const pathsToDelete = computed(() => {
+  if (!result.value) return [];
+  const paths: string[] = [];
+  for (const group of result.value.groups) {
+    for (const file of group.files) {
+      if (!file.keep) paths.push(file.path);
+    }
+  }
+  return paths;
+});
+
+// Toast 通知
+const toast = ref<{ visible: boolean; success: boolean; message: string }>({
+  visible: false,
+  success: true,
+  message: "",
+});
+let toastTimer: ReturnType<typeof setTimeout> | null = null;
+
+function showToast(success: boolean, message: string) {
+  if (toastTimer) clearTimeout(toastTimer);
+  toast.value = { visible: true, success, message };
+  if (success) {
+    toastTimer = setTimeout(() => {
+      toast.value.visible = false;
+    }, 4000);
+  }
+}
+
+function dismissToast() {
+  toast.value.visible = false;
+  if (toastTimer) {
+    clearTimeout(toastTimer);
+    toastTimer = null;
+  }
+}
+
+async function runDelete() {
+  if (pathsToDelete.value.length === 0) return;
+  const confirmMsg = `确定要删除 ${pathsToDelete.value.length} 个重复文件吗？此操作不可撤销。`;
+  if (!confirm(confirmMsg)) return;
+
+  deleting.value = true;
+  progress.value = { current: 0, total: 0, currentFile: "", phase: "deleting" };
+
+  unlistenProgress = await listenProgress((e: ProgressEvent) => {
+    progress.value = {
+      current: e.current,
+      total: e.total,
+      currentFile: e.current_file,
+      phase: e.phase,
+    };
+  });
+
+  try {
+    const msg = await deleteDuplicates(pathsToDelete.value);
+    showToast(true, msg);
+    // 清除结果，提示用户重新扫描
+    result.value = null;
+  } catch (e: any) {
+    showToast(false, "删除失败: " + e);
+  } finally {
+    deleting.value = false;
+    if (unlistenProgress) {
+      unlistenProgress();
+      unlistenProgress = null;
+    }
+  }
+}
 </script>
 
 <template>
@@ -137,7 +214,7 @@ function formatDate(iso: string): string {
         {{ scanning ? "扫描中…" : "🔍 开始扫描" }}
       </button>
       <ProgressBar
-        v-if="scanning"
+        v-if="scanning || deleting"
         :current="progress.current"
         :total="progress.total"
         :current-file="progress.currentFile"
@@ -160,6 +237,16 @@ function formatDate(iso: string): string {
           <span class="stat-val danger">{{ totalWastedMB }} MB</span>
           <span class="stat-lbl">可释放空间</span>
         </div>
+        <button
+          v-if="pathsToDelete.length > 0"
+          class="btn-delete"
+          :disabled="deleting"
+          @click="runDelete"
+        >
+          {{
+            deleting ? "删除中…" : `🗑 删除 ${pathsToDelete.length} 个重复文件`
+          }}
+        </button>
       </div>
 
       <div v-if="result.groups.length === 0" class="empty">
@@ -215,6 +302,19 @@ function formatDate(iso: string): string {
     <div v-else class="placeholder">
       选择文件夹后点击「开始扫描」检测重复文件
     </div>
+
+    <!-- Toast 通知 -->
+    <Transition name="toast">
+      <div
+        v-if="toast.visible"
+        class="toast"
+        :class="toast.success ? 'toast-success' : 'toast-error'"
+      >
+        <span class="toast-icon">{{ toast.success ? "✅" : "❌" }}</span>
+        <span class="toast-msg">{{ toast.message }}</span>
+        <button class="toast-close" @click="dismissToast">✕</button>
+      </div>
+    </Transition>
   </div>
 </template>
 
@@ -483,5 +583,97 @@ function formatDate(iso: string): string {
   text-align: center;
   padding: 64px;
   font-size: 13px;
+}
+
+.btn-delete {
+  margin-left: auto;
+  height: 36px;
+  padding: 0 18px;
+  border: none;
+  border-radius: 6px;
+  background: var(--color-danger);
+  color: #fff;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.btn-delete:hover:not(:disabled) {
+  opacity: 0.9;
+}
+
+.btn-delete:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Toast 通知 */
+.toast {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  min-width: 300px;
+  max-width: 480px;
+  border-radius: 8px;
+  padding: 12px 16px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+  z-index: 9999;
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.toast-success {
+  background: var(--color-surface);
+  border-left: 4px solid var(--color-success);
+}
+
+.toast-error {
+  background: var(--color-surface);
+  border-left: 4px solid var(--color-danger);
+}
+
+.toast-icon {
+  font-size: 16px;
+  flex-shrink: 0;
+}
+
+.toast-msg {
+  flex: 1;
+  font-weight: 500;
+}
+
+.toast-close {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--color-text-secondary);
+  font-size: 14px;
+  padding: 0 2px;
+}
+
+.toast-close:hover {
+  color: var(--color-text);
+}
+
+.toast-enter-active {
+  animation: toast-in 0.3s ease;
+}
+
+.toast-leave-active {
+  animation: toast-in 0.2s ease reverse;
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(16px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 </style>
