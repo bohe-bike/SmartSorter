@@ -142,6 +142,7 @@ pub async fn scan_media_authors(
 
     // ⑥ 匹配文件到关键字（文件名关键字优先）
     let mut no_match_count = 0u64;
+    let mut unmatched_files: Vec<MediaFile> = Vec::new();
     let mut grouped: HashMap<String, Vec<MediaFile>> = HashMap::new();
 
     for (index, (path, size_bytes, _meta)) in media_files.iter().enumerate() {
@@ -200,6 +201,24 @@ pub async fn scan_media_authors(
 
         if matched.is_empty() {
             no_match_count += 1;
+            let modified_at = std::fs::metadata(path)
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .map(|t| DateTime::<Local>::from(t).to_rfc3339())
+                .unwrap_or_default();
+
+            let media_file = MediaFile {
+                path: path.to_string_lossy().into_owned(),
+                file_name,
+                size_bytes: *size_bytes,
+                media_type: metadata::media_type_label(path)
+                    .unwrap_or("unknown")
+                    .to_string(),
+                matched_keywords: Vec::new(),
+                modified_at,
+                checked: true,
+            };
+            unmatched_files.push(media_file);
             continue;
         }
 
@@ -243,6 +262,9 @@ pub async fn scan_media_authors(
         .collect();
     groups.sort_by(|a, b| a.keyword.cmp(&b.keyword));
 
+    // 未匹配文件排序
+    unmatched_files.sort_by(|a, b| a.file_name.cmp(&b.file_name));
+
     // 更新 keyword_infos 中的 file_count
     for info in &mut keyword_infos {
         info.file_count = groups
@@ -259,6 +281,7 @@ pub async fn scan_media_authors(
         scanned_count: total,
         total_keywords: groups.len() as u64,
         no_match_count,
+        unmatched_files,
         keywords: keyword_infos,
         groups,
     };
@@ -297,6 +320,25 @@ pub fn preview_media_classify(
             let source = Path::new(&file.path);
             let root_dir = find_root_dir(source, &scan_result.source_paths);
             let target = build_target_path(source, &keyword, &root_dir)?;
+
+            if target == source {
+                continue; // 已在正确位置，跳过
+            }
+
+            items.push(ClassifyPreviewItem {
+                source_path: file.path.clone(),
+                target_path: target.to_string_lossy().into_owned(),
+                action_desc: format!("移动到 {} 并重命名", keyword),
+            });
+        }
+    }
+
+    // 处理未匹配的文件（需要用户手动指定关键字）
+    for file in &scan_result.unmatched_files {
+        if let Some(keyword) = request.keyword_assignments.get(&file.path) {
+            let source = Path::new(&file.path);
+            let root_dir = find_root_dir(source, &scan_result.source_paths);
+            let target = build_target_path(source, keyword, &root_dir)?;
 
             if target == source {
                 continue; // 已在正确位置，跳过

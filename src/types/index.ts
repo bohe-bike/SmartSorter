@@ -201,6 +201,7 @@ export interface MediaClassifyResult {
   scanned_count: number;
   total_keywords: number;
   no_match_count: number;
+  unmatched_files: MediaFile[];
   keywords: KeywordInfo[];
   groups: KeywordGroup[];
 }

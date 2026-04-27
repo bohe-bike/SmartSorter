@@ -8,6 +8,7 @@ pub struct MediaClassifyResult {
     pub scanned_count: u64,
     pub total_keywords: u64,
     pub no_match_count: u64,
+    pub unmatched_files: Vec<MediaFile>,
     pub keywords: Vec<KeywordInfo>,
     pub groups: Vec<KeywordGroup>,
 }

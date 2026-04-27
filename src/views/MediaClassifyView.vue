@@ -53,16 +53,20 @@ const selectedKeywordSources = computed(() =>
 
 const checkedPaths = computed(() => {
   if (!result.value) return [] as string[];
-  return result.value.groups.flatMap((group) =>
+  const groupedPaths = result.value.groups.flatMap((group) =>
     group.files.filter((file) => file.checked).map((file) => file.path),
   );
+  const unmatchedPaths = result.value.unmatched_files
+    .filter((file) => file.checked && keywordAssignments.value[file.path])
+    .map((file) => file.path);
+  return [...groupedPaths, ...unmatchedPaths];
 });
 
 const totalSelected = computed(() => checkedPaths.value.length);
 
 const totalSelectedSize = computed(() => {
   if (!result.value) return 0;
-  return result.value.groups.reduce((sum, group) => {
+  const groupedSize = result.value.groups.reduce((sum, group) => {
     return (
       sum +
       group.files
@@ -70,6 +74,10 @@ const totalSelectedSize = computed(() => {
         .reduce((groupSum, file) => groupSum + file.size_bytes, 0)
     );
   }, 0);
+  const unmatchedSize = result.value.unmatched_files
+    .filter((file) => file.checked && keywordAssignments.value[file.path])
+    .reduce((sum, file) => sum + file.size_bytes, 0);
+  return groupedSize + unmatchedSize;
 });
 
 // 多关键字匹配的文件列表
@@ -88,6 +96,18 @@ const multiMatchFiles = computed(() => {
     }
   }
   return files;
+});
+
+// 未匹配的文件列表
+const unmatchedFiles = computed(() => {
+  if (!result.value) return [];
+  return result.value.unmatched_files;
+});
+
+// 所有可用关键字（用于未匹配文件的手动选择）
+const allKeywords = computed(() => {
+  if (!result.value) return [];
+  return result.value.keywords.map((k) => k.keyword);
 });
 
 // 合并信息
@@ -378,6 +398,35 @@ function mediaIcon(type: string): string {
             "
           >
             <option v-for="kw in mf.keywords" :key="kw" :value="kw">
+              {{ kw }}
+            </option>
+          </select>
+        </div>
+      </div>
+
+      <!-- 未匹配文件提示 -->
+      <div v-if="unmatchedFiles.length > 0" class="unmatched-section">
+        <div class="panel-title">📭 未匹配文件（请手动选择关键字归类）</div>
+        <div
+          v-for="file in unmatchedFiles"
+          :key="file.path"
+          class="unmatched-row"
+        >
+          <input type="checkbox" v-model="file.checked" />
+          <span class="unmatched-name">{{ file.file_name }}</span>
+          <select
+            class="keyword-select"
+            :value="keywordAssignments[file.path] || ''"
+            :disabled="!file.checked"
+            @change="
+              assignKeyword(
+                file.path,
+                ($event.target as HTMLSelectElement).value,
+              )
+            "
+          >
+            <option value="" disabled>请选择关键字</option>
+            <option v-for="kw in allKeywords" :key="kw" :value="kw">
               {{ kw }}
             </option>
           </select>
@@ -832,6 +881,30 @@ function mediaIcon(type: string): string {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 未匹配文件 */
+.unmatched-section {
+  background: var(--color-surface);
+  border: 1px solid var(--color-text-secondary);
+  border-radius: 10px;
+  padding: 14px;
+}
+
+.unmatched-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0;
+}
+
+.unmatched-name {
+  flex: 1;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-text-secondary);
 }
 
 .keyword-select {
