@@ -19,10 +19,22 @@ const result = ref<DuplicateResult | null>(null);
 const progress = ref({ current: 0, total: 0, currentFile: "", phase: "" });
 let unlistenProgress: (() => void) | null = null;
 
-const totalWastedMB = computed(() => {
-  if (!result.value) return "0";
-  return (result.value.total_wasted_bytes / 1048576).toFixed(1);
+const totalWasted = computed(() => {
+  if (!result.value) return "0 B";
+  return formatSize(result.value.total_wasted_bytes);
 });
+
+// 分组折叠状态
+const collapsedGroups = ref(new Set<string>());
+
+function toggleCollapse(groupId: string) {
+  if (collapsedGroups.value.has(groupId)) {
+    collapsedGroups.value.delete(groupId);
+  } else {
+    collapsedGroups.value.add(groupId);
+  }
+  collapsedGroups.value = new Set(collapsedGroups.value);
+}
 
 async function addFolder() {
   const path = await pickFolder();
@@ -38,6 +50,7 @@ function removePath(index: number) {
 async function runScan() {
   if (sourcePaths.value.length === 0) return;
   scanning.value = true;
+  collapsedGroups.value = new Set();
   progress.value = { current: 0, total: 0, currentFile: "", phase: "scanning" };
 
   // 监听后端进度事件
@@ -95,6 +108,22 @@ function keepOldest(group: DuplicateGroup) {
     }
   }
   toggleKeep(group, oldestIdx);
+}
+
+// 对所有分组一键保留最新
+function keepAllNewest() {
+  if (!result.value) return;
+  for (const group of result.value.groups) {
+    keepNewest(group);
+  }
+}
+
+// 对所有分组一键保留最旧
+function keepAllOldest() {
+  if (!result.value) return;
+  for (const group of result.value.groups) {
+    keepOldest(group);
+  }
 }
 
 function formatSize(bytes: number): string {
@@ -234,19 +263,25 @@ async function runDelete() {
           <span class="stat-lbl">重复组</span>
         </div>
         <div class="stat">
-          <span class="stat-val danger">{{ totalWastedMB }} MB</span>
+          <span class="stat-val danger">{{ totalWasted }}</span>
           <span class="stat-lbl">可释放空间</span>
         </div>
-        <button
-          v-if="pathsToDelete.length > 0"
-          class="btn-delete"
-          :disabled="deleting"
-          @click="runDelete"
-        >
-          {{
-            deleting ? "删除中…" : `🗑 删除 ${pathsToDelete.length} 个重复文件`
-          }}
-        </button>
+        <div class="summary-actions">
+          <button class="btn-sm" @click="keepAllNewest">全部保留最新</button>
+          <button class="btn-sm" @click="keepAllOldest">全部保留最旧</button>
+          <button
+            v-if="pathsToDelete.length > 0"
+            class="btn-delete"
+            :disabled="deleting"
+            @click="runDelete"
+          >
+            {{
+              deleting
+                ? "删除中…"
+                : `🗑 删除 ${pathsToDelete.length} 个重复文件`
+            }}
+          </button>
+        </div>
       </div>
 
       <div v-if="result.groups.length === 0" class="empty">
@@ -272,9 +307,15 @@ async function runDelete() {
               <button class="btn-sm" @click="keepOldest(group)">
                 保留最旧
               </button>
+              <button
+                class="btn-sm btn-collapse"
+                @click="toggleCollapse(group.group_id)"
+              >
+                {{ collapsedGroups.has(group.group_id) ? "▶" : "▼" }}
+              </button>
             </div>
           </div>
-          <div class="file-list">
+          <div v-show="!collapsedGroups.has(group.group_id)" class="file-list">
             <div
               v-for="(file, fi) in group.files"
               :key="file.path"
@@ -291,7 +332,14 @@ async function runDelete() {
                 保留
               </label>
               <span class="file-path">{{ file.path }}</span>
-              <span class="file-date">{{ formatDate(file.modified_at) }}</span>
+              <span class="file-dates">
+                <span class="file-date"
+                  >改: {{ formatDate(file.modified_at) }}</span
+                >
+                <span v-if="file.created_at" class="file-date secondary"
+                  >建: {{ formatDate(file.created_at) }}</span
+                >
+              </span>
               <span v-if="!file.keep" class="delete-badge">待删除</span>
             </div>
           </div>
@@ -428,10 +476,20 @@ async function runDelete() {
 
 .summary {
   display: flex;
+  flex-wrap: wrap;
+  align-items: center;
   gap: 24px;
   padding: 12px;
   background: var(--color-surface);
   border-radius: 8px;
+}
+
+.summary-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .stat {
@@ -523,6 +581,13 @@ async function runDelete() {
   color: var(--color-primary);
 }
 
+.btn-collapse {
+  width: 28px;
+  padding: 0;
+  text-align: center;
+  font-size: 10px;
+}
+
 .file-list {
   display: flex;
   flex-direction: column;
@@ -564,9 +629,22 @@ async function runDelete() {
   white-space: nowrap;
 }
 
+.file-dates {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 1px;
+}
+
 .file-date {
   flex-shrink: 0;
   color: var(--color-text-secondary);
+  font-size: 11px;
+}
+
+.file-date.secondary {
+  opacity: 0.65;
 }
 
 .delete-badge {
