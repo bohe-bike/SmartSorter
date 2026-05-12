@@ -20,6 +20,10 @@ function formatDuration(ms: number): string {
   if (ms < 1000) return `${ms}ms`;
   return `${(ms / 1000).toFixed(1)}s`;
 }
+
+async function handleUndo(logId: string) {
+  await historyStore.undo(logId);
+}
 </script>
 
 <template>
@@ -36,6 +40,13 @@ function formatDuration(ms: number): string {
     </div>
 
     <div v-if="historyStore.loading" class="placeholder">加载中…</div>
+
+    <div v-else-if="historyStore.undoError" class="error-banner">
+      ✖ 撤销失败: {{ historyStore.undoError }}
+      <button class="btn-dismiss" @click="historyStore.undoError = null">
+        ×
+      </button>
+    </div>
 
     <div v-else-if="historyStore.logs.length === 0" class="placeholder">
       暂无操作记录
@@ -66,7 +77,7 @@ function formatDuration(ms: number): string {
             <button
               v-if="log.undo_status === 'available'"
               class="btn-undo"
-              @click="historyStore.undo(log.log_id)"
+              @click="handleUndo(log.log_id)"
             >
               ↩ 撤销
             </button>
@@ -150,6 +161,29 @@ function formatDuration(ms: number): string {
   color: var(--color-text-secondary);
   text-align: center;
   padding: 64px;
+}
+
+.error-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  background: rgba(229, 62, 62, 0.08);
+  border: 1px solid var(--color-danger);
+  border-radius: 6px;
+  color: var(--color-danger);
+  font-size: 13px;
+  margin-bottom: 4px;
+}
+
+.btn-dismiss {
+  margin-left: auto;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--color-danger);
+  font-size: 16px;
+  line-height: 1;
 }
 
 .log-list {
