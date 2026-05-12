@@ -111,6 +111,7 @@ export interface PreviewRequest {
 
 export interface PreviewResult {
   task_id: string;
+  rule_set_name: string;
   generated_at: string;
   summary: PreviewSummary;
   items: PreviewItem[];
@@ -233,12 +234,14 @@ export interface MediaFile {
 export interface ClassifyExecuteRequest {
   task_id: string;
   keyword_assignments: Record<string, string>;
+  selected_paths: string[];
 }
 
 export interface ClassifyPreviewItem {
   source_path: string;
   target_path: string;
   action_desc: string;
+  size_bytes: number;
 }
 
 export interface ClassifyPreviewResult {

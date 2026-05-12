@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use super::rule::ConflictStrategy;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PreviewRequest {
@@ -12,6 +12,7 @@ pub struct PreviewRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PreviewResult {
     pub task_id: String,
+    pub rule_set_name: String,
     pub generated_at: String,
     pub summary: PreviewSummary,
     pub items: Vec<PreviewItem>,

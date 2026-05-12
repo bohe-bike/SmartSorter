@@ -44,6 +44,7 @@ pub struct MediaFile {
 pub struct ClassifyExecuteRequest {
     pub task_id: String,
     pub keyword_assignments: HashMap<String, String>,
+    pub selected_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,6 +52,7 @@ pub struct ClassifyPreviewItem {
     pub source_path: String,
     pub target_path: String,
     pub action_desc: String,
+    pub size_bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -41,8 +41,9 @@ pub async fn scan_media_authors(
             if let Ok(entries) = std::fs::read_dir(root) {
                 for entry in entries.flatten() {
                     if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                        let name = entry.file_name().to_string_lossy().to_string();
-                        if !name.is_empty() && !folder_keywords.contains(&name) {
+                        let name = entry.file_name().to_string_lossy().trim().to_string();
+                        // 过滤空名称及极短名称（避免单字符误匹配大量文件）
+                        if name.chars().count() >= 2 && !folder_keywords.contains(&name) {
                             folder_keywords.push(name);
                         }
                     }
@@ -51,29 +52,66 @@ pub async fn scan_media_authors(
         }
     }
 
-    // ② 扫描文件并提取元数据
-    let mut media_files: Vec<(PathBuf, u64, metadata::MediaMetadata)> = Vec::new();
-    for root_path in &paths {
-        let root = Path::new(root_path);
-        if !root.exists() {
-            continue;
-        }
-        for file in scanner::scan_directory(root, recursive, None) {
-            let Some(mt) = metadata::get_media_type(&file) else {
-                continue;
-            };
-            let mt_name = metadata::media_type_name(mt);
-            if !filters.is_empty() && !filters.iter().any(|v| v == mt_name) {
+    // ② 先在阻塞线程中快速扫描文件路径（不提取元数据）
+    let (paths_for_scan, filters_for_scan) = (paths.clone(), filters.clone());
+    let raw_files: Vec<(PathBuf, u64)> = tauri::async_runtime::spawn_blocking(move || {
+        let mut files = Vec::new();
+        for root_path in &paths_for_scan {
+            let root = Path::new(root_path);
+            if !root.exists() {
                 continue;
             }
-            if let Ok(file_meta) = std::fs::metadata(&file) {
-                let meta = metadata::extract_all_metadata(&file);
-                media_files.push((file, file_meta.len(), meta));
+            for file in scanner::scan_directory(root, recursive, None) {
+                let Some(mt) = metadata::get_media_type(&file) else {
+                    continue;
+                };
+                let mt_name = metadata::media_type_name(mt);
+                if !filters_for_scan.is_empty() && !filters_for_scan.iter().any(|v| v == mt_name) {
+                    continue;
+                }
+                if let Ok(file_meta) = std::fs::metadata(&file) {
+                    files.push((file, file_meta.len()));
+                }
             }
         }
-    }
+        files
+    })
+    .await
+    .map_err(|e| e.to_string())?;
 
-    let total = media_files.len() as u64;
+    // 去重：多源目录嵌套时同一文件可能被扫描多次
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+    let raw_files: Vec<(PathBuf, u64)> = raw_files
+        .into_iter()
+        .filter(|(p, _)| seen.insert(p.clone()))
+        .collect();
+
+    let total = raw_files.len() as u64;
+
+    // 在单个阻塞线程中批量提取元数据并发送进度事件（避免逐文件 spawn 开销）
+    let app_clone = app.clone();
+    let task_id_clone = task_id.clone();
+    let media_files: Vec<(PathBuf, u64, metadata::MediaMetadata)> =
+        tauri::async_runtime::spawn_blocking(move || {
+            let mut files = Vec::new();
+            for (index, (path, size_bytes)) in raw_files.into_iter().enumerate() {
+                let _ = app_clone.emit(
+                    "progress",
+                    ProgressPayload {
+                        task_id: task_id_clone.clone(),
+                        current: index as u64 + 1,
+                        total,
+                        current_file: path.to_string_lossy().into_owned(),
+                        phase: "scanning".into(),
+                    },
+                );
+                let meta = metadata::extract_all_metadata(&path);
+                files.push((path, size_bytes, meta));
+            }
+            files
+        })
+        .await
+        .map_err(|e| e.to_string())?;
 
     // ③ 从元数据中收集关键字
     let mut metadata_keywords: HashSet<String> = HashSet::new();
@@ -100,13 +138,18 @@ pub async fn scan_media_authors(
         }
     }
 
-    // ④ 合并所有关键字
-    let mut all_keywords: Vec<String> = folder_keywords.clone();
-    for kw in metadata_keywords {
-        if !all_keywords.contains(&kw) {
-            all_keywords.push(kw);
+    // ④ 合并所有关键字（用 HashSet 去重，避免 O(n²) 线性查找）
+    // 同时过滤极短关键字（< 2 个字符），防止误匹配
+    let all_keywords: Vec<String> = {
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut combined: Vec<String> = Vec::new();
+        for kw in folder_keywords.iter().chain(metadata_keywords.iter()) {
+            if kw.chars().count() >= 2 && seen.insert(kw.clone()) {
+                combined.push(kw.clone());
+            }
         }
-    }
+        combined
+    };
 
     // ⑤ 关键字包含关系合并：若 A 包含 B 的文本，合并为 B（最短关键字）
     let merged_map = merge_containing_keywords(&all_keywords);
@@ -123,11 +166,12 @@ pub async fn scan_media_authors(
     for kw in &final_keywords {
         let merged_from: Vec<String> = merged_map
             .iter()
-            .filter(|(_, v)| *v == kw && **v != ***v) // 这里需要找出所有映射到 kw 的原始值
+            .filter(|(k, v)| v.as_str() == kw.as_str() && k.as_str() != kw.as_str())
             .map(|(k, _)| k.clone())
-            .filter(|k| k != kw)
             .collect();
-        let source = if folder_keywords.contains(kw) {
+        let source = if folder_keywords.contains(kw) && metadata_keywords.contains(kw) {
+            "folder_name,metadata"
+        } else if folder_keywords.contains(kw) {
             "folder_name"
         } else {
             "metadata"
@@ -166,15 +210,16 @@ pub async fn scan_media_authors(
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
 
-        // 先从文件名匹配关键字
+        // 先从文件名匹配关键字（大小写不敏感）
         let mut matched: Vec<String> = Vec::new();
+        let file_stem_lower = file_stem.to_lowercase();
         for kw in &final_keywords {
-            if file_stem.contains(kw.as_str()) {
+            if file_stem_lower.contains(&kw.to_lowercase()) {
                 matched.push(kw.clone());
             }
         }
 
-        // 如果文件名没匹配到，再从元数据尝试
+        // 如果文件名没匹配到，再从元数据尝试（大小写不敏感）
         if matched.is_empty() {
             let meta = &media_files[index].2;
             let meta_values: Vec<&str> = [
@@ -188,10 +233,11 @@ pub async fn scan_media_authors(
             .collect();
 
             for kw in &final_keywords {
-                if meta_values
-                    .iter()
-                    .any(|v| v.contains(kw.as_str()) || kw.contains(*v))
-                {
+                let kw_lower = kw.to_lowercase();
+                if meta_values.iter().any(|v| {
+                    let v_lower = v.to_lowercase();
+                    v_lower.contains(&kw_lower) || kw_lower.contains(&v_lower)
+                }) {
                     if !matched.contains(kw) {
                         matched.push(kw.clone());
                     }
@@ -307,9 +353,17 @@ pub fn preview_media_classify(
         result.clone()
     };
 
+    let selected: HashSet<&str> = request.selected_paths.iter().map(|s| s.as_str()).collect();
+    // 追踪本批次已分配的目标路径，防止同名覆盖
+    let mut used_targets: HashSet<PathBuf> = HashSet::new();
+
     let mut items = Vec::new();
     for group in &scan_result.groups {
         for file in &group.files {
+            if !selected.contains(file.path.as_str()) {
+                continue; // 用户未勾选，跳过
+            }
+
             // 获取用户指定的关键字（多匹配时由前端选择），否则取默认所属组
             let keyword = request
                 .keyword_assignments
@@ -319,9 +373,10 @@ pub fn preview_media_classify(
 
             let source = Path::new(&file.path);
             let root_dir = find_root_dir(source, &scan_result.source_paths);
-            let target = build_target_path(source, &keyword, &root_dir)?;
+            let base_target = build_target_path(source, &keyword, &root_dir)?;
+            let target = resolve_unique_target(base_target, &mut used_targets);
 
-            if target == source {
+            if paths_equal(target.as_path(), source) {
                 continue; // 已在正确位置，跳过
             }
 
@@ -329,18 +384,23 @@ pub fn preview_media_classify(
                 source_path: file.path.clone(),
                 target_path: target.to_string_lossy().into_owned(),
                 action_desc: format!("移动到 {} 并重命名", keyword),
+                size_bytes: file.size_bytes,
             });
         }
     }
 
     // 处理未匹配的文件（需要用户手动指定关键字）
     for file in &scan_result.unmatched_files {
+        if !selected.contains(file.path.as_str()) {
+            continue;
+        }
         if let Some(keyword) = request.keyword_assignments.get(&file.path) {
             let source = Path::new(&file.path);
             let root_dir = find_root_dir(source, &scan_result.source_paths);
-            let target = build_target_path(source, keyword, &root_dir)?;
+            let base_target = build_target_path(source, keyword, &root_dir)?;
+            let target = resolve_unique_target(base_target, &mut used_targets);
 
-            if target == source {
+            if paths_equal(target.as_path(), source) {
                 continue; // 已在正确位置，跳过
             }
 
@@ -348,6 +408,7 @@ pub fn preview_media_classify(
                 source_path: file.path.clone(),
                 target_path: target.to_string_lossy().into_owned(),
                 action_desc: format!("移动到 {} 并重命名", keyword),
+                size_bytes: file.size_bytes,
             });
         }
     }
@@ -376,6 +437,15 @@ pub async fn execute_media_classify(app: AppHandle, task_id: String) -> Result<S
             return Err("任务 ID 不匹配，请重新生成预览".into());
         }
         preview.clone()
+    };
+
+    // 获取扫描根目录，用于限制空目录清理不越过根目录
+    let source_roots: HashSet<PathBuf> = {
+        let cache = MEDIA_SCAN_CACHE.lock().map_err(|e| e.to_string())?;
+        cache
+            .as_ref()
+            .map(|r| r.source_paths.iter().map(PathBuf::from).collect())
+            .unwrap_or_default()
     };
 
     let start = std::time::Instant::now();
@@ -430,9 +500,9 @@ pub async fn execute_media_classify(app: AppHandle, task_id: String) -> Result<S
         });
     }
 
-    // 清理空文件夹
+    // 清理空文件夹（向上递归，但不越过扫描根目录）
     for parent in &source_parents {
-        let _ = remove_empty_dir_recursive(parent);
+        let _ = remove_empty_dir_recursive(parent, &source_roots);
     }
 
     let log = ExecutionLog {
@@ -473,8 +543,8 @@ fn build_target_path(source: &Path, keyword: &str, root_dir: &Path) -> Result<Pa
 
     let safe_keyword = sanitize_segment(keyword);
 
-    // 构建主题：从文件名中移除关键字
-    let topic = stem.replace(keyword, "");
+    // 构建主题：大小写不敏感地从文件名中移除第一次出现的关键字
+    let topic = ci_remove_first(&stem, keyword);
     // 清理主题中的前后分隔符
     let topic = topic
         .trim_matches(|c: char| c == '-' || c == '_' || c == ' ' || c == '　')
@@ -501,11 +571,19 @@ fn build_target_path(source: &Path, keyword: &str, root_dir: &Path) -> Result<Pa
     Ok(target)
 }
 
-/// 找到文件对应的扫描根目录
+/// 找到文件对应的扫描根目录（Windows 上大小写不敏感）
 fn find_root_dir(source: &Path, source_paths: &[String]) -> PathBuf {
     for sp in source_paths {
         let root = Path::new(sp);
-        if source.starts_with(root) {
+        #[cfg(target_os = "windows")]
+        let matches = {
+            let src_lower = source.to_string_lossy().to_lowercase();
+            let root_lower = root.to_string_lossy().to_lowercase();
+            src_lower.starts_with(&root_lower)
+        };
+        #[cfg(not(target_os = "windows"))]
+        let matches = source.starts_with(root);
+        if matches {
             return root.to_path_buf();
         }
     }
@@ -513,20 +591,23 @@ fn find_root_dir(source: &Path, source_paths: &[String]) -> PathBuf {
     source.parent().unwrap_or(Path::new(".")).to_path_buf()
 }
 
-/// 关键字包含关系合并
+/// 关键字包含关系合并（大小写不敏感）
 /// 如果关键字 A 包含关键字 B 的文本（如 "小凛蝶子" 包含 "蝶子"），合并为最短的 B
 fn merge_containing_keywords(keywords: &[String]) -> HashMap<String, String> {
     let mut result: HashMap<String, String> = HashMap::new();
 
     for kw in keywords {
+        let kw_lower = kw.to_lowercase();
         let mut shortest = kw.clone();
+        let mut shortest_len = kw.len();
         for other in keywords {
             if kw == other {
                 continue;
             }
-            // kw 包含 other 的文本 → other 更短，应合并到 other
-            if kw.contains(other.as_str()) && other.len() < shortest.len() {
+            // 大小写不敏感：若 kw 包含 other，则合并到更短的 other
+            if kw_lower.contains(&other.to_lowercase()) && other.len() < shortest_len {
                 shortest = other.clone();
+                shortest_len = other.len();
             }
         }
         result.insert(kw.clone(), shortest);
@@ -535,9 +616,9 @@ fn merge_containing_keywords(keywords: &[String]) -> HashMap<String, String> {
     result
 }
 
-/// 递归删除空目录（仅清理空目录，不删除含文件的目录）
-fn remove_empty_dir_recursive(path: &Path) -> Result<(), String> {
-    if !path.is_dir() {
+/// 递归删除空目录（向上递归，但不删除扫描根目录及其祖先）
+fn remove_empty_dir_recursive(path: &Path, roots: &HashSet<PathBuf>) -> Result<(), String> {
+    if !path.is_dir() || roots.contains(path) {
         return Ok(());
     }
     let entries: Vec<_> = std::fs::read_dir(path)
@@ -546,6 +627,9 @@ fn remove_empty_dir_recursive(path: &Path) -> Result<(), String> {
         .collect();
     if entries.is_empty() {
         std::fs::remove_dir(path).map_err(|e| e.to_string())?;
+        if let Some(parent) = path.parent() {
+            let _ = remove_empty_dir_recursive(parent, roots);
+        }
     }
     Ok(())
 }
@@ -565,6 +649,62 @@ fn sanitize_segment(value: &str) -> String {
     } else {
         trimmed
     }
+}
+
+/// 在 Windows（大小写不敏感文件系统）上忽略大小写比较路径
+#[cfg(target_os = "windows")]
+fn paths_equal(a: &Path, b: &Path) -> bool {
+    a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn paths_equal(a: &Path, b: &Path) -> bool {
+    a == b
+}
+
+/// 大小写不敏感地移除字符串中第一次出现的 pattern（仅处理 ASCII/CJK 等常见媒体文件名字符）
+fn ci_remove_first(s: &str, pattern: &str) -> String {
+    let s_lower = s.to_lowercase();
+    let p_lower = pattern.to_lowercase();
+    if let Some(start) = s_lower.find(&p_lower) {
+        let end = start + p_lower.len();
+        if s.is_char_boundary(start) && s.is_char_boundary(end) {
+            return format!("{}{}", &s[..start], &s[end..]);
+        }
+    }
+    s.to_string()
+}
+
+/// 若目标路径已被磁盘占用或本批次已分配，自动追加 (2)、(3)… 后缀避免覆盖
+fn resolve_unique_target(initial: PathBuf, used: &mut HashSet<PathBuf>) -> PathBuf {
+    if !initial.exists() && !used.contains(&initial) {
+        used.insert(initial.clone());
+        return initial;
+    }
+    let stem = initial
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let ext = initial
+        .extension()
+        .map(|e| e.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let parent = initial.parent().unwrap_or(Path::new("."));
+    for counter in 2u32..=9999 {
+        let new_name = if ext.is_empty() {
+            format!("{} ({})", stem, counter)
+        } else {
+            format!("{} ({}).{}", stem, counter, ext)
+        };
+        let candidate = parent.join(&new_name);
+        if !candidate.exists() && !used.contains(&candidate) {
+            used.insert(candidate.clone());
+            return candidate;
+        }
+    }
+    // 极端情况兜底
+    used.insert(initial.clone());
+    initial
 }
 
 fn normalize_media_filters(filters: &[String]) -> Vec<String> {

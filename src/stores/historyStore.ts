@@ -6,6 +6,7 @@ import { loadHistory, undoTask } from "../utils/tauriApi";
 export const useHistoryStore = defineStore("history", () => {
   const logs = ref<ExecutionLog[]>([]);
   const loading = ref(false);
+  const undoError = ref<string | null>(null);
 
   async function load() {
     loading.value = true;
@@ -17,9 +18,14 @@ export const useHistoryStore = defineStore("history", () => {
   }
 
   async function undo(logId: string) {
-    await undoTask(logId);
-    await load();
+    undoError.value = null;
+    try {
+      await undoTask(logId);
+      await load();
+    } catch (e: any) {
+      undoError.value = String(e);
+    }
   }
 
-  return { logs, loading, load, undo };
+  return { logs, loading, undoError, load, undo };
 });

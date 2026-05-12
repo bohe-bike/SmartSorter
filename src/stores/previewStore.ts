@@ -30,6 +30,7 @@ export const usePreviewStore = defineStore("preview", () => {
         .map((item) => item.id);
       const msg = await executeTask(taskId, checkedIds);
       executeResult.value = { success: true, message: msg || "执行完成" };
+      result.value = null; // 执行成功后清除预览，防止重复执行旧任务
     } catch (e: any) {
       executeResult.value = { success: false, message: String(e) };
     } finally {

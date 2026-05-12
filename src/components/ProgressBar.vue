@@ -12,6 +12,7 @@ const phaseLabels: Record<string, string> = {
   hashing: "计算哈希中…",
   matching: "匹配规则中…",
   executing: "执行操作中…",
+  deleting: "删除文件中…",
 };
 </script>
 

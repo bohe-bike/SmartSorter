@@ -18,7 +18,7 @@ pub async fn scan_duplicates(
     // async 使 Tauri 在后台线程池执行，不阻塞主窗口
     let task_id = Uuid::new_v4().to_string();
 
-    // 第一步：收集所有文件及大小
+    // 第一步：收集所有文件及大小，并按文件大小预筛（spawn_blocking 避免阻塞 tokio 线程）
     let _ = app.emit(
         "progress",
         ProgressPayload {
@@ -30,65 +30,74 @@ pub async fn scan_duplicates(
         },
     );
 
-    let mut all_files: Vec<(std::path::PathBuf, u64)> = Vec::new();
-    for p in &paths {
-        let root = Path::new(p);
-        if !root.exists() {
-            continue;
-        }
-        let files = scanner::scan_directory(root, recursive, None);
-        for f in files {
-            if let Ok(meta) = std::fs::metadata(&f) {
-                all_files.push((f, meta.len()));
-            }
-        }
-    }
-
-    let scanned_count = all_files.len() as u64;
-
-    // 第二步：按文件大小分组（快速预筛）
-    let mut size_groups: HashMap<u64, Vec<std::path::PathBuf>> = HashMap::new();
-    for (path, size) in &all_files {
-        if *size == 0 {
-            continue;
-        } // 跳过空文件
-        size_groups.entry(*size).or_default().push(path.clone());
-    }
-
-    // 只保留 size 相同 >= 2 个的文件
-    let candidates: Vec<(u64, Vec<std::path::PathBuf>)> = size_groups
-        .into_iter()
-        .filter(|(_, files)| files.len() >= 2)
-        .collect();
-
-    // 第三步：对候选文件计算 SHA-256 哈希，精确去重
-    let mut hash_groups: HashMap<String, Vec<(std::path::PathBuf, u64)>> = HashMap::new();
-    let total_candidates: u64 = candidates.iter().map(|(_, files)| files.len() as u64).sum();
-    let mut hashed_count: u64 = 0;
-    for (size, files) in &candidates {
-        for file in files {
-            hashed_count += 1;
-            let _ = app.emit(
-                "progress",
-                ProgressPayload {
-                    task_id: task_id.clone(),
-                    current: hashed_count,
-                    total: total_candidates,
-                    current_file: file.to_string_lossy().into_owned(),
-                    phase: "hashing".into(),
-                },
-            );
-            match hasher::compute_sha256(file) {
-                Ok(hash) => {
-                    hash_groups
-                        .entry(hash)
-                        .or_default()
-                        .push((file.clone(), *size));
+    let (scanned_count, candidates) = tauri::async_runtime::spawn_blocking({
+        let paths = paths.clone();
+        move || {
+            let mut all_files: Vec<(std::path::PathBuf, u64)> = Vec::new();
+            for p in &paths {
+                let root = std::path::Path::new(p);
+                if !root.exists() {
+                    continue;
                 }
-                Err(_) => continue,
+                let files = scanner::scan_directory(root, recursive, None);
+                for f in files {
+                    if let Ok(meta) = std::fs::metadata(&f) {
+                        all_files.push((f, meta.len()));
+                    }
+                }
             }
+            let scanned_count = all_files.len() as u64;
+            // 第二步：按文件大小分组（快速预筛）
+            let mut size_groups: HashMap<u64, Vec<std::path::PathBuf>> = HashMap::new();
+            for (path, size) in &all_files {
+                if *size == 0 {
+                    continue;
+                }
+                size_groups.entry(*size).or_default().push(path.clone());
+            }
+            let candidates: Vec<(u64, Vec<std::path::PathBuf>)> = size_groups
+                .into_iter()
+                .filter(|(_, files)| files.len() >= 2)
+                .collect();
+            (scanned_count, candidates)
         }
-    }
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // 第三步：对候选文件计算 SHA-256 哈希，精确去重（在 spawn_blocking 中执行，避免阻塞 tokio 线程）
+    let total_candidates: u64 = candidates.iter().map(|(_, files)| files.len() as u64).sum();
+    let app_clone = app.clone();
+    let task_id_clone = task_id.clone();
+    let hash_groups: HashMap<String, Vec<(std::path::PathBuf, u64)>> =
+        tauri::async_runtime::spawn_blocking(move || {
+            let mut map: HashMap<String, Vec<(std::path::PathBuf, u64)>> = HashMap::new();
+            let mut hashed_count: u64 = 0;
+            for (size, files) in &candidates {
+                for file in files {
+                    hashed_count += 1;
+                    let _ = app_clone.emit(
+                        "progress",
+                        ProgressPayload {
+                            task_id: task_id_clone.clone(),
+                            current: hashed_count,
+                            total: total_candidates,
+                            current_file: file.to_string_lossy().into_owned(),
+                            phase: "hashing".into(),
+                        },
+                    );
+                    match hasher::compute_sha256(file) {
+                        Ok(hash) => {
+                            map.entry(hash).or_default().push((file.clone(), *size));
+                        }
+                        Err(_) => continue,
+                    }
+                }
+            }
+            map
+        })
+        .await
+        .map_err(|e| e.to_string())?;
 
     // 第四步：构建结果
     let mut groups: Vec<DuplicateGroup> = Vec::new();

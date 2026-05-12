@@ -1,34 +1,44 @@
+use crate::engine::{executor, undo};
+use crate::models::log::{ExecutionLog, ExecutionSummary, Operation, OperationStatus, UndoStatus};
+use crate::models::preview::PreviewResult;
+use crate::models::progress::ProgressPayload;
+use crate::storage::log_store;
+use chrono::Local;
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Mutex;
 use tauri::command;
-use tauri::{AppHandle, Manager, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use uuid::Uuid;
-use chrono::Local;
-use crate::models::preview::PreviewResult;
-use crate::models::progress::ProgressPayload;
-use crate::models::log::{ExecutionLog, ExecutionSummary, Operation, OperationStatus, UndoStatus};
-use crate::engine::{executor, undo};
-use crate::storage::log_store;
 
 /// 全局缓存：保存最近的预览结果，执行时从此取数据
 pub static PREVIEW_CACHE: Mutex<Option<PreviewResult>> = Mutex::new(None);
 
 #[command]
-pub async fn execute_task(app: AppHandle, task_id: String, checked_ids: Vec<String>) -> Result<String, String> {
+pub async fn execute_task(
+    app: AppHandle,
+    task_id: String,
+    checked_ids: Vec<String>,
+) -> Result<String, String> {
     let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
 
     // 从缓存中 clone 出所需数据后立即释放锁，避免在 async 中长期持有 Mutex
-    let items = {
+    let checked_set: HashSet<&str> = checked_ids.iter().map(|s| s.as_str()).collect();
+    let (items, rule_set_name) = {
         let cache = PREVIEW_CACHE.lock().map_err(|e| e.to_string())?;
-        let preview = cache.as_ref()
+        let preview = cache
+            .as_ref()
             .ok_or_else(|| "没有可用的预览结果，请先执行分析预览".to_string())?;
         if preview.task_id != task_id {
             return Err("任务 ID 不匹配，请重新分析预览".into());
         }
-        preview.items.iter()
-            .filter(|item| checked_ids.contains(&item.id))
+        let filtered = preview
+            .items
+            .iter()
+            .filter(|item| checked_set.contains(item.id.as_str()))
             .cloned()
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>();
+        (filtered, preview.rule_set_name.clone())
     }; // MutexGuard 在此释放
 
     let start = std::time::Instant::now();
@@ -39,10 +49,16 @@ pub async fn execute_task(app: AppHandle, task_id: String, checked_ids: Vec<Stri
     let total_items = items.len() as u64;
 
     for (idx, item) in items.iter().enumerate() {
-        let _ = app.emit("progress", ProgressPayload {
-            task_id: task_id.clone(), current: idx as u64, total: total_items,
-            current_file: item.source.path.clone(), phase: "executing".into(),
-        });
+        let _ = app.emit(
+            "progress",
+            ProgressPayload {
+                task_id: task_id.clone(),
+                current: idx as u64,
+                total: total_items,
+                current_file: item.source.path.clone(),
+                phase: "executing".into(),
+            },
+        );
 
         let source = Path::new(&item.source.path);
         let target = Path::new(&item.target.path);
@@ -57,7 +73,9 @@ pub async fn execute_task(app: AppHandle, task_id: String, checked_ids: Vec<Stri
             continue;
         }
 
-        let action_type = item.changes.first()
+        let action_type = item
+            .changes
+            .first()
             .map(|c| c.action_type.as_str())
             .unwrap_or("unknown");
 
@@ -70,8 +88,14 @@ pub async fn execute_task(app: AppHandle, task_id: String, checked_ids: Vec<Stri
         };
 
         let (status, error_message) = match &result {
-            Ok(()) => { succeeded += 1; (OperationStatus::Success, None) }
-            Err(e) => { failed += 1; (OperationStatus::Failed, Some(e.clone())) }
+            Ok(()) => {
+                succeeded += 1;
+                (OperationStatus::Success, None)
+            }
+            Err(e) => {
+                failed += 1;
+                (OperationStatus::Failed, Some(e.clone()))
+            }
         };
 
         operations.push(Operation {
@@ -88,21 +112,30 @@ pub async fn execute_task(app: AppHandle, task_id: String, checked_ids: Vec<Stri
     let duration_ms = start.elapsed().as_millis() as u64;
 
     // 在 operations 被 move 前收集失败详情
-    let fail_details: Vec<String> = operations.iter()
+    let fail_details: Vec<String> = operations
+        .iter()
         .filter(|op| op.status == OperationStatus::Failed)
         .map(|op| {
             let err = op.error_message.as_deref().unwrap_or("未知错误");
-            format!("  {} → {}\n    原因: {}", op.source_path, op.target_path, err)
+            format!(
+                "  {} → {}\n    原因: {}",
+                op.source_path, op.target_path, err
+            )
         })
         .collect();
 
     let log = ExecutionLog {
         log_id: Uuid::new_v4().to_string(),
         task_id,
-        rule_set_name: String::new(),
+        rule_set_name,
         executed_at: Local::now().to_rfc3339(),
         duration_ms,
-        summary: ExecutionSummary { total: operations.len() as u64, succeeded, failed, skipped },
+        summary: ExecutionSummary {
+            total: operations.len() as u64,
+            succeeded,
+            failed,
+            skipped,
+        },
         operations,
         undo_status: UndoStatus::Available,
     };
@@ -112,7 +145,10 @@ pub async fn execute_task(app: AppHandle, task_id: String, checked_ids: Vec<Stri
     if failed > 0 {
         let msg = format!(
             "执行完成：{} 成功, {} 失败, {} 跳过\n\n失败详情:\n{}",
-            succeeded, failed, skipped, fail_details.join("\n")
+            succeeded,
+            failed,
+            skipped,
+            fail_details.join("\n")
         );
         Err(msg)
     } else {
@@ -121,26 +157,31 @@ pub async fn execute_task(app: AppHandle, task_id: String, checked_ids: Vec<Stri
 }
 
 #[command]
-pub fn undo_task(app: AppHandle, log_id: String) -> Result<(), String> {
+pub async fn undo_task(app: AppHandle, log_id: String) -> Result<(), String> {
     let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    let logs = log_store::load_all(&data_dir)?;
-    let log = logs.iter()
-        .find(|l| l.log_id == log_id)
-        .ok_or_else(|| "未找到对应的执行日志".to_string())?;
 
-    let _new_status = undo::undo_operations(log)?;
+    // 在 spawn_blocking 中执行文件 I/O，避免阻塞 tokio 线程
+    tauri::async_runtime::spawn_blocking(move || {
+        let logs = log_store::load_all(&data_dir)?;
+        let log = logs
+            .iter()
+            .find(|l| l.log_id == log_id)
+            .ok_or_else(|| "未找到对应的执行日志".to_string())?;
 
-    // 更新日志中的 undo_status
-    let mut all_logs = log_store::load_all(&data_dir)?;
-    if let Some(entry) = all_logs.iter_mut().find(|l| l.log_id == log_id) {
-        entry.undo_status = UndoStatus::Expired;
-    }
-    // 重写日志文件
-    let path = data_dir.join("execution_logs.json");
-    let content = serde_json::to_string_pretty(&all_logs)
-        .map_err(|e| format!("序列化失败: {}", e))?;
-    std::fs::write(&path, content)
-        .map_err(|e| format!("写入日志失败: {}", e))?;
+        let new_status = undo::undo_operations(log)?;
 
-    Ok(())
+        // 更新日志中的 undo_status（根据实际结果写入，而非加确嵌入 Expired）
+        let mut all_logs = log_store::load_all(&data_dir)?;
+        if let Some(entry) = all_logs.iter_mut().find(|l| l.log_id == log_id) {
+            entry.undo_status = new_status;
+        }
+        let path = data_dir.join("execution_logs.json");
+        let content =
+            serde_json::to_string_pretty(&all_logs).map_err(|e| format!("序列化失败: {}", e))?;
+        std::fs::write(&path, content).map_err(|e| format!("写入日志失败: {}", e))?;
+
+        Ok::<(), String>(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
