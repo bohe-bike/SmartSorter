@@ -38,6 +38,10 @@ const executionMessage = ref("");
 const progress = ref({ current: 0, total: 0, currentFile: "", phase: "" });
 // 用户对多关键字匹配文件的手动选择：文件路径 → 选定关键字
 const keywordAssignments = ref<Record<string, string>>({});
+// 分组折叠状态：存储已折叠的关键字
+const collapsedGroups = ref(new Set<string>());
+// 关键字分组搜索过滤词
+const keywordFilter = ref("");
 
 let unlistenProgress: (() => void) | null = null;
 
@@ -116,6 +120,22 @@ const mergedKeywords = computed(() => {
   return result.value.keywords.filter((k) => k.merged_from.length > 0);
 });
 
+// 按关键字过滤后的分组列表
+const filteredGroups = computed(() => {
+  if (!result.value) return [];
+  const q = keywordFilter.value.trim().toLowerCase();
+  if (!q) return result.value.groups;
+  return result.value.groups.filter((g) => g.keyword.toLowerCase().includes(q));
+});
+
+// 剩余未分配关键字的未匹配文件数（随用户选择实时更新）
+const remainingUnmatched = computed(() => {
+  if (!result.value) return 0;
+  return result.value.unmatched_files.filter(
+    (file) => !keywordAssignments.value[file.path],
+  ).length;
+});
+
 async function addFolder() {
   const path = await pickFolder();
   if (path && !sourcePaths.value.includes(path)) {
@@ -160,7 +180,9 @@ async function runScan() {
   preview.value = null;
   executionMessage.value = "";
   keywordAssignments.value = {};
-  resetProgress("extracting");
+  collapsedGroups.value = new Set();
+  keywordFilter.value = "";
+  resetProgress("scanning");
   await prepareProgressListener();
 
   try {
@@ -192,6 +214,20 @@ function assignKeyword(filePath: string, keyword: string) {
   keywordAssignments.value[filePath] = keyword;
 }
 
+function toggleCollapse(keyword: string) {
+  if (collapsedGroups.value.has(keyword)) {
+    collapsedGroups.value.delete(keyword);
+  } else {
+    collapsedGroups.value.add(keyword);
+  }
+  // 触发响应式更新
+  collapsedGroups.value = new Set(collapsedGroups.value);
+}
+
+function clearPreview() {
+  preview.value = null;
+}
+
 async function generatePreview() {
   if (!result.value || checkedPaths.value.length === 0) {
     return;
@@ -211,6 +247,7 @@ async function generatePreview() {
     preview.value = await previewMediaClassify({
       task_id: result.value.task_id,
       keyword_assignments: assignments,
+      selected_paths: checkedPaths.value,
     });
     executionMessage.value = "";
   } catch (error) {
@@ -358,7 +395,7 @@ function mediaIcon(type: string): string {
           <span class="stat-label">关键字分组</span>
         </div>
         <div class="stat-card">
-          <span class="stat-value warning">{{ result.no_match_count }}</span>
+          <span class="stat-value warning">{{ remainingUnmatched }}</span>
           <span class="stat-label">未匹配</span>
         </div>
         <div class="stat-card">
@@ -455,13 +492,18 @@ function mediaIcon(type: string): string {
         <div v-if="preview" class="preview-box">
           <div class="preview-head">
             <span class="panel-title">预览结果（{{ preview.total }} 项）</span>
-            <button
-              class="btn-execute"
-              :disabled="executing || preview.total === 0"
-              @click="executeChanges"
-            >
-              {{ executing ? "执行中…" : "确认执行" }}
-            </button>
+            <div class="preview-head-actions">
+              <button class="btn-clear-preview" @click="clearPreview">
+                ✕ 取消
+              </button>
+              <button
+                class="btn-execute"
+                :disabled="executing || preview.total === 0"
+                @click="executeChanges"
+              >
+                {{ executing ? "执行中…" : "确认执行" }}
+              </button>
+            </div>
           </div>
           <div class="preview-list">
             <div
@@ -469,7 +511,9 @@ function mediaIcon(type: string): string {
               :key="item.source_path"
               class="preview-item"
             >
-              <div class="preview-desc">{{ item.action_desc }}</div>
+              <div class="preview-desc">
+                {{ item.action_desc }} · {{ formatSize(item.size_bytes) }}
+              </div>
               <div class="preview-path">{{ item.source_path }}</div>
               <div class="preview-arrow">→</div>
               <div class="preview-path target">{{ item.target_path }}</div>
@@ -477,9 +521,9 @@ function mediaIcon(type: string): string {
           </div>
         </div>
 
-        <div v-if="result.no_match_count > 0" class="message-box">
+        <div v-if="remainingUnmatched > 0" class="message-box">
           有
-          {{ result.no_match_count }} 个文件未匹配到任何关键字，将保持原位不动。
+          {{ remainingUnmatched }} 个文件未匹配到任何关键字，将保持原位不动。
         </div>
 
         <div v-if="executionMessage" class="message-box success-msg">
@@ -492,8 +536,18 @@ function mediaIcon(type: string): string {
       </div>
 
       <div v-else class="group-list">
+        <div class="keyword-filter-bar">
+          <input
+            v-model="keywordFilter"
+            class="keyword-filter-input"
+            placeholder="搜索关键字分组…"
+          />
+          <span class="keyword-filter-count"
+            >{{ filteredGroups.length }} / {{ result.groups.length }}</span
+          >
+        </div>
         <div
-          v-for="group in result.groups"
+          v-for="group in filteredGroups"
           :key="group.keyword"
           class="author-group"
         >
@@ -515,10 +569,16 @@ function mediaIcon(type: string): string {
               <button class="btn-sm" @click="toggleGroup(group, false)">
                 清空
               </button>
+              <button
+                class="btn-sm btn-collapse"
+                @click="toggleCollapse(group.keyword)"
+              >
+                {{ collapsedGroups.has(group.keyword) ? "▶" : "▼" }}
+              </button>
             </div>
           </div>
 
-          <div class="file-list">
+          <div v-show="!collapsedGroups.has(group.keyword)" class="file-list">
             <label
               v-for="file in group.files"
               :key="file.path"
@@ -933,6 +993,61 @@ function mediaIcon(type: string): string {
 
 .success-msg {
   border-left: 3px solid var(--color-success);
+}
+
+/* 预览头部操作区 */
+.preview-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.btn-clear-preview {
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.btn-clear-preview:hover {
+  color: var(--color-text);
+  border-color: var(--color-text-secondary);
+}
+
+/* 关键字过滤栏 */
+.keyword-filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.keyword-filter-input {
+  flex: 1;
+  height: 32px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  padding: 0 10px;
+  font-size: 13px;
+  background: var(--color-bg);
+  color: var(--color-text);
+}
+
+.keyword-filter-count {
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+/* 折叠按钮 */
+.btn-collapse {
+  width: 28px;
+  padding: 0;
+  text-align: center;
+  font-size: 10px;
 }
 
 @media (max-width: 900px) {
