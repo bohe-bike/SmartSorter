@@ -17,6 +17,8 @@ const recursive = ref(true);
 
 // 当前编辑中的规则方案（本地状态，保存时才持久化）
 const editingRuleSet = ref<RuleSet | null>(null);
+// 跟踪未保存的修改
+const isDirty = ref(false);
 
 // 进度状态
 const progress = ref({ current: 0, total: 0, currentFile: "", phase: "" });
@@ -57,10 +59,13 @@ function createRuleSet() {
     updated_at: now,
     rules: [],
   };
+  isDirty.value = true;
 }
 
-function selectRuleSet(rs: RuleSet) {
+function selectRuleSet(rs: RuleSet | undefined) {
+  if (!rs) return;
   editingRuleSet.value = JSON.parse(JSON.stringify(rs));
+  isDirty.value = false;
 }
 
 function addRule() {
@@ -73,22 +78,26 @@ function addRule() {
     actions: [],
   };
   editingRuleSet.value.rules.push(rule);
+  isDirty.value = true;
 }
 
 function updateRule(index: number, rule: Rule) {
   if (!editingRuleSet.value) return;
   editingRuleSet.value.rules[index] = rule;
+  isDirty.value = true;
 }
 
 function removeRule(index: number) {
   if (!editingRuleSet.value) return;
   editingRuleSet.value.rules.splice(index, 1);
+  isDirty.value = true;
 }
 
 async function saveRuleSet() {
   if (!editingRuleSet.value) return;
   editingRuleSet.value.updated_at = new Date().toISOString();
   await ruleStore.save(editingRuleSet.value);
+  isDirty.value = false;
   // 保存后从 store 同步最新数据，确保下拉框名称正确
   const saved = ruleStore.ruleSets.find(
     (rs) => rs.id === editingRuleSet.value!.id,
@@ -96,6 +105,13 @@ async function saveRuleSet() {
   if (saved) {
     editingRuleSet.value = JSON.parse(JSON.stringify(saved));
   }
+}
+
+async function deleteRuleSet() {
+  if (!editingRuleSet.value) return;
+  if (!confirm(`确定删除方案「${editingRuleSet.value.name}」？`)) return;
+  await ruleStore.remove(editingRuleSet.value.id);
+  editingRuleSet.value = null;
 }
 
 // ===== 进度监听 =====
@@ -129,7 +145,10 @@ onUnmounted(() => {
 
 async function runPreview() {
   if (!editingRuleSet.value) return;
-  await saveRuleSet();
+  // 只在有未保存修改时才执行磁盘写入
+  if (isDirty.value) {
+    await saveRuleSet();
+  }
   await startProgress();
   try {
     await previewStore.analyze({
@@ -138,6 +157,8 @@ async function runPreview() {
       recursive: recursive.value,
       max_depth: null,
     });
+  } catch (e: any) {
+    showToast(false, "分析失败: " + e);
   } finally {
     stopProgress();
   }
@@ -235,7 +256,7 @@ async function runExecute() {
                       ruleStore.ruleSets.find(
                         (r) =>
                           r.id === ($event.target as HTMLSelectElement).value,
-                      )!,
+                      ),
                     )
               "
             >
@@ -249,8 +270,20 @@ async function runExecute() {
               </option>
               <option value="__new__">＋ 新建方案</option>
             </select>
-            <button v-if="editingRuleSet" class="btn-save" @click="saveRuleSet">
-              💾 保存
+            <button
+              v-if="editingRuleSet"
+              class="btn-save"
+              :class="{ dirty: isDirty }"
+              @click="saveRuleSet"
+            >
+              {{ isDirty ? "💾 保存*" : "💾 保存" }}
+            </button>
+            <button
+              v-if="editingRuleSet"
+              class="btn-delete-rs"
+              @click="deleteRuleSet"
+            >
+              🗑
             </button>
           </div>
         </div>
@@ -260,6 +293,7 @@ async function runExecute() {
             class="ruleset-name"
             v-model="editingRuleSet.name"
             placeholder="方案名称"
+            @input="isDirty = true"
           />
           <MagicVarRef />
           <div class="rule-list">
@@ -482,6 +516,28 @@ async function runExecute() {
 
 .btn-save:hover {
   background: var(--color-active);
+}
+
+.btn-save.dirty {
+  border-color: var(--color-warning);
+  color: var(--color-warning);
+}
+
+.btn-delete-rs {
+  height: 30px;
+  width: 30px;
+  padding: 0;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.btn-delete-rs:hover {
+  border-color: var(--color-danger);
+  color: var(--color-danger);
 }
 
 .ruleset-name {
