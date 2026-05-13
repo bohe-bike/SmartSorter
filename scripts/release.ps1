@@ -50,6 +50,7 @@ if (-not $Message) {
 }
 
 $tagName = "v$Version"
+$remoteName = ""
 
 $root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 if (-not (Test-Path "$root\package.json")) {
@@ -63,8 +64,27 @@ if (-not (Test-Path "$root\package.json")) {
     $root = Get-Location
 }
 
+Push-Location $root
+$remoteName = git rev-parse --abbrev-ref --symbolic-full-name "@{u}" 2>$null
+if ($LASTEXITCODE -eq 0 -and $remoteName -match "^(?<remote>[^/]+)/") {
+    $remoteName = $Matches.remote
+} else {
+    $remoteName = ""
+}
+
+if (-not $remoteName) {
+    $remoteName = git remote | Select-Object -First 1
+}
+Pop-Location
+
+if (-not $remoteName) {
+    Write-Error "未找到 Git 远程仓库，请先配置 remote"
+    exit 1
+}
+
 Write-Host "=== SmartSorter Release $tagName ===" -ForegroundColor Cyan
 Write-Host "项目根目录: $root"
+Write-Host "Git 远程仓库: $remoteName"
 
 # ---- 1. 更新 package.json ----
 Write-Host "`n[1/5] 更新 package.json ..." -ForegroundColor Yellow
@@ -117,7 +137,7 @@ if ($LocalBuild) {
         }
 
         if (-not $repo) {
-            $repoUrl = git -C $root config --get remote.origin.url
+            $repoUrl = git -C $root config --get "remote.$remoteName.url"
             if ($repoUrl -match "github\.com[:/](?<repo>[^/]+/[^/.]+)(?:\.git)?$") {
                 $repo = $Matches.repo
             }
@@ -167,24 +187,24 @@ Write-Host "已创建 tag: $tagName"
 if ($Push) {
     Write-Host "`n推送到远程 ..." -ForegroundColor Yellow
     Push-Location $root
-    git push
+    git push $remoteName HEAD
     if ($LASTEXITCODE -ne 0) { Write-Error "推送 commit 失败"; exit 1 }
 
-    $remoteTag = git ls-remote --tags origin "refs/tags/$tagName"
+    $remoteTag = git ls-remote --tags $remoteName "refs/tags/$tagName"
     if ($LASTEXITCODE -ne 0) { Write-Error "检查远程 tag $tagName 失败"; exit 1 }
     if ($remoteTag) {
         Write-Host "远程 tag $tagName 已存在，先删除后重新推送 ..." -ForegroundColor Yellow
-        git push origin --delete $tagName
+        git push $remoteName --delete $tagName
         if ($LASTEXITCODE -ne 0) { Write-Error "删除远程 tag $tagName 失败"; exit 1 }
     }
 
-    git push origin "refs/tags/$tagName"
+    git push $remoteName "refs/tags/$tagName"
     if ($LASTEXITCODE -ne 0) { Write-Error "推送 tag $tagName 失败"; exit 1 }
     Pop-Location
     Write-Host "推送完成!" -ForegroundColor Green
 } else {
     Write-Host "`n提示：运行以下命令推送到远程：" -ForegroundColor Gray
-    Write-Host "  git push"
-    Write-Host "  git push origin --delete $tagName  # 如果远程已存在同名 tag"
-    Write-Host "  git push origin refs/tags/$tagName"
+    Write-Host "  git push $remoteName HEAD"
+    Write-Host "  git push $remoteName --delete $tagName  # 如果远程已存在同名 tag"
+    Write-Host "  git push $remoteName refs/tags/$tagName"
 }

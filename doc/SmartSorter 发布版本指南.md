@@ -73,9 +73,9 @@ src-tauri/target/release/
 完成后手动推送：
 
 ```powershell
-git push
-git push origin --delete v1.2.0  # 如果远程已存在同名 tag
-git push origin refs/tags/v1.2.0
+git push <remote> HEAD
+git push <remote> --delete v1.2.0  # 如果远程已存在同名 tag
+git push <remote> refs/tags/v1.2.0
 ```
 
 ---
@@ -93,7 +93,7 @@ git push origin refs/tags/v1.2.0
  ├─ git commit                        │
  ├─ git tag v1.2.0                    │
  ├─ 如同名 tag 已存在则删除后重建       │
- ├─ git push origin refs/tags/v1.2.0 ─►│
+ ├─ git push <remote> refs/tags/v1.2.0►│
  │                                    ├─ 检出代码
  │                                    ├─ 安装 Node.js + pnpm + Rust
  │                                    ├─ cargo install tauri-cli
@@ -163,9 +163,9 @@ git push origin refs/tags/v1.2.0
 .\scripts\release.ps1 -Version "1.2.0" -LocalBuild
 
 # 推送到 GitHub
-git push
-git push origin --delete v1.2.0  # 如果远程已存在同名 tag
-git push origin refs/tags/v1.2.0
+git push <remote> HEAD
+git push <remote> --delete v1.2.0  # 如果远程已存在同名 tag
+git push <remote> refs/tags/v1.2.0
 
 # 然后去 GitHub Releases 页面手动上传 exe/msi
 ```
@@ -186,9 +186,9 @@ git push origin refs/tags/v1.2.0
 .\scripts\release.ps1 -Version "1.2.0" -LocalBuild
 
 # 确认产物正常后推送，云端也会再编译一份上传到 Release
-git push
-git push origin --delete v1.2.0  # 如果远程已存在同名 tag
-git push origin refs/tags/v1.2.0
+git push <remote> HEAD
+git push <remote> --delete v1.2.0  # 如果远程已存在同名 tag
+git push <remote> refs/tags/v1.2.0
 ```
 
 ---
