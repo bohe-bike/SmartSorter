@@ -43,21 +43,6 @@ jobs:
       - name: Build frontend
         run: pnpm build
 
-      - name: Check signing key
-        shell: pwsh
-        env:
-          KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-        run: |
-          if ([string]::IsNullOrEmpty($env:KEY)) {
-            Write-Error "TAURI_SIGNING_PRIVATE_KEY is empty!"
-            exit 1
-          }
-          $lines = ($env:KEY -split "`n").Count
-          Write-Host "Signing key is set, line count: $lines"
-          if ($lines -lt 2) {
-            Write-Warning "Key appears to be single-line — may be incorrectly formatted"
-          }
-
       - name: Build Tauri
         run: pnpm tauri build
         env:
