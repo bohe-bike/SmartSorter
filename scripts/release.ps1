@@ -8,8 +8,8 @@
   默认执行步骤（推荐，CI 构建）：
   1. 更新 package.json、Cargo.toml、tauri.conf.json 中的版本号
   2. git add + commit
-  3. 创建 git tag (v1.1.0)
-  4. 可选推送到远程（push tag 后 GitHub Actions 会自动创建 Release 并上传产物）
+  3. 创建 git tag (v1.1.0；如本地已存在则删除后重建)
+  4. 可选推送到远程（如远程已存在同名 tag 则删除后重新推送，GitHub Actions 会自动创建 Release 并上传产物）
 
   可选步骤：
   - 使用 -LocalBuild 时，本地先执行前端构建和 Tauri 打包，用于发布前自检。
@@ -49,6 +49,8 @@ if (-not $Message) {
     $Message = "release: v$Version"
 }
 
+$tagName = "v$Version"
+
 $root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 if (-not (Test-Path "$root\package.json")) {
     $root = Split-Path -Parent $PSScriptRoot
@@ -61,7 +63,7 @@ if (-not (Test-Path "$root\package.json")) {
     $root = Get-Location
 }
 
-Write-Host "=== SmartSorter Release v$Version ===" -ForegroundColor Cyan
+Write-Host "=== SmartSorter Release $tagName ===" -ForegroundColor Cyan
 Write-Host "项目根目录: $root"
 
 # ---- 1. 更新 package.json ----
@@ -148,21 +150,41 @@ git add package.json src-tauri/Cargo.toml src-tauri/tauri.conf.json CHANGELOG.md
 git commit -m $Message
 
 # ---- 6. Git tag ----
-Write-Host "[7/7] 创建 Git Tag v$Version ..." -ForegroundColor Yellow
-git tag -a "v$Version" -m $Message
+Write-Host "[7/7] 创建 Git Tag $tagName ..." -ForegroundColor Yellow
+$existingTag = git tag --list $tagName
+if ($existingTag) {
+    Write-Host "本地 tag $tagName 已存在，先删除后重新创建 ..." -ForegroundColor Yellow
+    git tag -d $tagName
+    if ($LASTEXITCODE -ne 0) { Write-Error "删除本地 tag $tagName 失败"; exit 1 }
+}
+git tag -a $tagName -m $Message
+if ($LASTEXITCODE -ne 0) { Write-Error "创建 Git Tag $tagName 失败"; exit 1 }
 Pop-Location
 
 Write-Host "`n=== 完成! ===" -ForegroundColor Green
-Write-Host "已创建 tag: v$Version"
+Write-Host "已创建 tag: $tagName"
 
 if ($Push) {
     Write-Host "`n推送到远程 ..." -ForegroundColor Yellow
     Push-Location $root
     git push
-    git push --tags
+    if ($LASTEXITCODE -ne 0) { Write-Error "推送 commit 失败"; exit 1 }
+
+    $remoteTag = git ls-remote --tags origin "refs/tags/$tagName"
+    if ($LASTEXITCODE -ne 0) { Write-Error "检查远程 tag $tagName 失败"; exit 1 }
+    if ($remoteTag) {
+        Write-Host "远程 tag $tagName 已存在，先删除后重新推送 ..." -ForegroundColor Yellow
+        git push origin --delete $tagName
+        if ($LASTEXITCODE -ne 0) { Write-Error "删除远程 tag $tagName 失败"; exit 1 }
+    }
+
+    git push origin "refs/tags/$tagName"
+    if ($LASTEXITCODE -ne 0) { Write-Error "推送 tag $tagName 失败"; exit 1 }
     Pop-Location
     Write-Host "推送完成!" -ForegroundColor Green
 } else {
     Write-Host "`n提示：运行以下命令推送到远程：" -ForegroundColor Gray
-    Write-Host "  git push && git push --tags"
+    Write-Host "  git push"
+    Write-Host "  git push origin --delete $tagName  # 如果远程已存在同名 tag"
+    Write-Host "  git push origin refs/tags/$tagName"
 }
