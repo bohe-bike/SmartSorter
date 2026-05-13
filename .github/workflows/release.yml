@@ -51,7 +51,14 @@ jobs:
 
       - name: Generate latest.json
         shell: pwsh
+        env:
+          HAS_SIGN_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
         run: |
+          if ($env:HAS_SIGN_KEY -ne 'true') {
+            Write-Warning "TAURI_SIGNING_PRIVATE_KEY is not set — skipping latest.json (auto-update will not work)"
+            exit 0
+          }
+
           $tag = "${{ github.ref_name }}"
           $version = $tag.TrimStart('v')
           $repo = "${{ github.repository }}"
@@ -59,9 +66,9 @@ jobs:
           $pubDate = (Get-Date -Format "yyyy-MM-ddTHH:mm:ssZ")
 
           $nsisZip = Get-ChildItem "$bundleDir/nsis/*.nsis.zip" -ErrorAction SilentlyContinue | Select-Object -First 1
-          if (-not $nsisZip) { Write-Error "Signed NSIS zip not found"; exit 1 }
+          if (-not $nsisZip) { Write-Warning "Signed NSIS zip not found, skipping latest.json"; exit 0 }
           $nsisSig = Get-Item "$($nsisZip.FullName).sig" -ErrorAction SilentlyContinue
-          if (-not $nsisSig) { Write-Error "Signature file not found (is TAURI_SIGNING_PRIVATE_KEY set?)"; exit 1 }
+          if (-not $nsisSig) { Write-Warning "Signature .sig file not found, skipping latest.json"; exit 0 }
 
           $sig = (Get-Content $nsisSig.FullName -Raw).Trim()
           $manifest = [ordered]@{
@@ -89,4 +96,3 @@ jobs:
             src-tauri/target/release/bundle/nsis/*.nsis.zip
             src-tauri/target/release/bundle/nsis/*.nsis.zip.sig
             src-tauri/target/release/bundle/msi/*.msi
-            latest.json
