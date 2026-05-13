@@ -41,7 +41,9 @@ src-tauri/target/release/
 ├── smart-sorter.exe              ← 独立可执行文件（可直接运行）
 └── bundle/
     ├── msi/*.msi                 ← MSI 安装包
-    └── nsis/*.exe                ← NSIS 安装程序
+    ├── msi/*.msi.sig             ← MSI 更新签名（自动更新必需）
+    ├── nsis/*.exe                ← NSIS 安装程序
+    └── nsis/*.exe.sig            ← NSIS 更新签名（自动更新必需）
 ```
 
 | 产物               | 说明                | 适合场景           |
@@ -49,6 +51,8 @@ src-tauri/target/release/
 | `smart-sorter.exe` | 免安装，双击即用    | 绿色版 / U盘携带   |
 | `.msi`             | 标准 Windows 安装包 | 正式安装，支持卸载 |
 | `.exe (NSIS)`      | 带向导的安装程序    | 分发给最终用户     |
+| `.sig`             | 安装包签名          | Tauri 自动更新校验 |
+| `latest.json`      | 更新清单            | 上传到 GitHub Release 根附件 |
 
 ### 4. 一键发版（脚本方式）
 
@@ -77,7 +81,7 @@ git push --tags
 
 ## 二、线上自动编译（GitHub Actions）
 
-推送 Tag 后，GitHub 自动在云端编译并创建 Release，附带可下载的安装包。
+推送 Tag 后，GitHub 自动在云端编译并创建 Release，附带可下载的安装包、签名文件和 `latest.json` 更新清单。
 
 ### 1. 工作原理
 
@@ -93,8 +97,9 @@ git push --tags
  │                                    ├─ cargo install tauri-cli
  │                                    ├─ pnpm build（编译前端）
  │                                    ├─ cargo tauri build（编译后端）
+ │                                    ├─ 生成 latest.json
  │                                    ├─ 创建 GitHub Release 页面
- │                                    └─ 上传 .exe / .msi 到 Release
+ │                                    └─ 上传 .exe / .msi / .sig / latest.json 到 Release
  │                                    │
  └─ 在 GitHub Releases 页面下载 ◄────┘
 ```
@@ -117,6 +122,8 @@ git push --tags
 1. 打开 GitHub 仓库 → **Actions** 标签页 → 查看构建进度
 2. 首次构建约 10-15 分钟（安装依赖+编译），后续约 5 分钟（有缓存）
 3. 构建完成后进入 **Releases** 页面，即可看到自动创建的 Release 及附件下载
+4. Release 附件必须包含 `latest.json`；否则客户端检查更新会请求失败：
+   `https://github.com/bohe-bike/SmartSorter/releases/latest/download/latest.json`
 
 ### 4. 工作流配置文件
 
@@ -195,11 +202,13 @@ git push --tags
 ## 六、注意事项
 
 1. 发布前请更新 `CHANGELOG.md`，脚本会自动将其纳入 commit
-2. 首次云端构建较慢（10-15 分钟），后续有 Rust 缓存会快很多
-3. 确保 Git 远程仓库已配置：`git remote -v` 查看
-4. 如遇网络问题推送失败，配置 Git 代理：
+2. 自动更新必须在 GitHub 仓库 Secrets 中配置 `TAURI_SIGNING_PRIVATE_KEY`，如私钥有密码还需配置 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
+3. `TAURI_SIGNING_PRIVATE_KEY` 必须与 `src-tauri/tauri.conf.json` 中的 updater `pubkey` 对应
+4. 首次云端构建较慢（10-15 分钟），后续有 Rust 缓存会快很多
+5. 确保 Git 远程仓库已配置：`git remote -v` 查看
+6. 如遇网络问题推送失败，配置 Git 代理：
    ```powershell
    git config --global http.proxy http://127.0.0.1:7890
    git config --global https.proxy http://127.0.0.1:7890
    ```
-5. 数据文件存储位置：`C:\Users\<用户名>\AppData\Roaming\com.smartsorter.app\`
+7. 数据文件存储位置：`C:\Users\<用户名>\AppData\Roaming\com.smartsorter.app\`

@@ -104,11 +104,39 @@ if ($LocalBuild) {
     $msi = Get-ChildItem "$bundleDir\msi\*.msi" -ErrorAction SilentlyContinue | Select-Object -First 1
     $nsis = Get-ChildItem "$bundleDir\nsis\*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
     $exe = Join-Path $root "src-tauri\target\release\smart-sorter.exe"
+    $latestJson = Join-Path $root "latest.json"
+
+    try {
+        $repo = ""
+
+        $tauriConfig = Get-Content (Join-Path $root "src-tauri\tauri.conf.json") -Raw
+        if ($tauriConfig -match "github\.com/(?<repo>[^/]+/[^/]+)/releases") {
+            $repo = $Matches.repo
+        }
+
+        if (-not $repo) {
+            $repoUrl = git -C $root config --get remote.origin.url
+            if ($repoUrl -match "github\.com[:/](?<repo>[^/]+/[^/.]+)(?:\.git)?$") {
+                $repo = $Matches.repo
+            }
+        }
+
+        $manifestScript = Join-Path $root "scripts\generate-latest-json.ps1"
+        if ($repo) {
+            & $manifestScript -Version $Version -Tag "v$Version" -Repository $repo -BundleDir $bundleDir -OutputPath $latestJson
+        } else {
+            Write-Warning "无法从 tauri.conf.json 或 remote.origin.url 推断 GitHub 仓库，跳过 latest.json 生成"
+        }
+    } catch {
+        Write-Warning "latest.json 未生成：$($_.Exception.Message)"
+        Write-Warning "如需自动更新，请确认 TAURI_SIGNING_PRIVATE_KEY 已设置，并存在 .exe.sig 或 .msi.sig 签名文件。"
+    }
 
     Write-Host "`n构建产物：" -ForegroundColor Green
     if (Test-Path $exe) { Write-Host "  EXE:  $exe" }
     if ($msi)  { Write-Host "  MSI:  $($msi.FullName)" }
     if ($nsis) { Write-Host "  NSIS: $($nsis.FullName)" }
+    if (Test-Path $latestJson) { Write-Host "  UPDATER: $latestJson" }
 } else {
     Write-Host "`n[4/7] 跳过本地构建，交给 GitHub Actions 编译" -ForegroundColor DarkGray
 }
