@@ -40,7 +40,10 @@ jobs:
         with:
           workspaces: src-tauri
 
-      - name: Build (frontend + Tauri)
+      - name: Build frontend
+        run: pnpm build
+
+      - name: Build Tauri
         run: pnpm tauri build
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
