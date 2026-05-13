@@ -21,6 +21,14 @@
       "csp": null
     }
   },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/bohe-bike/SmartSorter/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDZERUU3QkZBNzUwNzZCQTAKUldTZ2F3ZDErbnZ1YlZGUnh4MHVBRUJQQzJXZ3FiOVNXV3dWSEZaa1JyOW9qeXBGUGxEK0htanoK"
+    }
+  },
   "bundle": {
     "active": true,
     "targets": "all",

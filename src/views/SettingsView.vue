@@ -1,6 +1,74 @@
 <script setup lang="ts">
 import { onMounted, ref, watch } from "vue";
 import { getVersion } from "@tauri-apps/api/app";
+import { check, type Update } from "@tauri-apps/plugin-updater";
+
+type UpdateStatus =
+  | "idle"
+  | "checking"
+  | "available"
+  | "up-to-date"
+  | "downloading"
+  | "ready"
+  | "error";
+
+const updateStatus = ref<UpdateStatus>("idle");
+const pendingUpdate = ref<Update | null>(null);
+const updateVersion = ref("");
+const updateNotes = ref("");
+const downloadProgress = ref(0);
+const updateError = ref("");
+
+async function checkForUpdate() {
+  updateStatus.value = "checking";
+  updateError.value = "";
+  try {
+    const update = await check();
+    if (update) {
+      updateStatus.value = "available";
+      updateVersion.value = update.version;
+      updateNotes.value = update.body ?? "";
+      pendingUpdate.value = update;
+    } else {
+      updateStatus.value = "up-to-date";
+    }
+  } catch (e) {
+    updateStatus.value = "error";
+    updateError.value = String(e);
+  }
+}
+
+async function doInstall() {
+  if (!pendingUpdate.value) return;
+  updateStatus.value = "downloading";
+  downloadProgress.value = 0;
+  let downloaded = 0;
+  let contentLength = 0;
+  try {
+    await pendingUpdate.value.downloadAndInstall((event) => {
+      switch (event.event) {
+        case "Started":
+          contentLength = event.data.contentLength ?? 0;
+          break;
+        case "Progress":
+          downloaded += event.data.chunkLength;
+          if (contentLength > 0) {
+            downloadProgress.value = Math.round(
+              (downloaded / contentLength) * 100,
+            );
+          }
+          break;
+        case "Finished":
+          downloadProgress.value = 100;
+          break;
+      }
+    });
+    updateStatus.value = "ready";
+  } catch (e) {
+    updateStatus.value = "error";
+    updateError.value = String(e);
+  }
+}
 
 const theme = ref<"system" | "light" | "dark">(
   (localStorage.getItem("ss-theme") as any) || "system",
@@ -85,6 +153,51 @@ onMounted(async () => {
         <p><strong>SmartSorter</strong> v{{ appVersion }}</p>
         <p>桌面端文件智能整理工具</p>
         <p class="tech">Tauri 2 + Vue 3 + Rust</p>
+      </div>
+      <div class="update-section">
+        <div v-if="updateStatus === 'idle'" class="setting-row">
+          <label>软件更新</label>
+          <button class="btn-check" @click="checkForUpdate">检查更新</button>
+        </div>
+        <div v-else-if="updateStatus === 'checking'" class="update-status">
+          <span class="status-text">正在检查更新...</span>
+        </div>
+        <div v-else-if="updateStatus === 'up-to-date'" class="update-status">
+          <span class="status-text status-ok">已是最新版本 ✓</span>
+          <button class="btn-secondary" @click="updateStatus = 'idle'">
+            关闭
+          </button>
+        </div>
+        <div v-else-if="updateStatus === 'available'" class="update-available">
+          <div class="update-info">
+            <span class="update-version">发现新版本 v{{ updateVersion }}</span>
+            <p v-if="updateNotes" class="update-notes">{{ updateNotes }}</p>
+          </div>
+          <div class="update-actions">
+            <button class="btn-secondary" @click="updateStatus = 'idle'">
+              暂不更新
+            </button>
+            <button class="btn-primary" @click="doInstall">下载并安装</button>
+          </div>
+        </div>
+        <div v-else-if="updateStatus === 'downloading'" class="update-status">
+          <span class="status-text">正在下载... {{ downloadProgress }}%</span>
+          <div class="update-progress-bar">
+            <div
+              class="update-progress-fill"
+              :style="{ width: downloadProgress + '%' }"
+            ></div>
+          </div>
+        </div>
+        <div v-else-if="updateStatus === 'ready'" class="update-status">
+          <span class="status-text status-ok">安装完成，应用将自动重启 ✓</span>
+        </div>
+        <div v-else-if="updateStatus === 'error'" class="update-status">
+          <span class="status-text status-error">{{ updateError }}</span>
+          <button class="btn-secondary" @click="updateStatus = 'idle'">
+            重试
+          </button>
+        </div>
       </div>
     </section>
   </div>
@@ -199,5 +312,91 @@ onMounted(async () => {
 .about-info .tech {
   color: var(--color-text-secondary);
   font-size: 12px;
+}
+
+.update-section {
+  margin-top: 12px;
+  border-top: 1px solid var(--color-border);
+  padding-top: 12px;
+}
+
+.btn-check,
+.btn-primary {
+  padding: 6px 14px;
+  border-radius: 4px;
+  border: none;
+  cursor: pointer;
+  font-size: 13px;
+  background: var(--color-primary);
+  color: #fff;
+}
+
+.btn-secondary {
+  padding: 6px 14px;
+  border-radius: 4px;
+  border: 1px solid var(--color-border);
+  cursor: pointer;
+  font-size: 13px;
+  background: transparent;
+  color: var(--color-text);
+}
+
+.update-status {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0;
+  flex-wrap: wrap;
+}
+
+.status-text {
+  font-size: 13px;
+  flex: 1;
+}
+
+.status-ok {
+  color: var(--color-success, #22c55e);
+}
+
+.status-error {
+  color: var(--color-danger, #ef4444);
+}
+
+.update-available {
+  padding: 8px 0;
+}
+
+.update-version {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-primary);
+}
+
+.update-notes {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  margin: 4px 0 8px;
+  white-space: pre-wrap;
+}
+
+.update-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.update-progress-bar {
+  width: 100%;
+  height: 6px;
+  background: var(--color-border);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.update-progress-fill {
+  height: 100%;
+  background: var(--color-primary);
+  border-radius: 3px;
+  transition: width 0.2s;
 }
 </style>
