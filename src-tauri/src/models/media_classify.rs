@@ -2,6 +2,21 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeywordAlias {
+    pub alias: String,
+    pub canonical: String,
+    pub confirmations: u64,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AliasLearningHint {
+    pub source_path: String,
+    pub alias: String,
+    pub canonical: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MediaClassifyResult {
     pub task_id: String,
     pub source_paths: Vec<String>,
@@ -64,4 +79,6 @@ pub struct ClassifyPreviewResult {
     pub task_id: String,
     pub items: Vec<ClassifyPreviewItem>,
     pub total: u64,
+    #[serde(skip)]
+    pub learning_hints: Vec<AliasLearningHint>,
 }

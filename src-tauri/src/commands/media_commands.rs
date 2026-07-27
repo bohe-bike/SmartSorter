@@ -9,11 +9,11 @@ use uuid::Uuid;
 use crate::engine::{executor, metadata, scanner};
 use crate::models::log::{ExecutionLog, ExecutionSummary, Operation, OperationStatus, UndoStatus};
 use crate::models::media_classify::{
-    ClassifyExecuteRequest, ClassifyPreviewItem, ClassifyPreviewResult, KeywordGroup, KeywordInfo,
-    MediaClassifyResult, MediaFile,
+    AliasLearningHint, ClassifyExecuteRequest, ClassifyPreviewItem, ClassifyPreviewResult,
+    KeywordAlias, KeywordGroup, KeywordInfo, MediaClassifyResult, MediaFile,
 };
 use crate::models::progress::ProgressPayload;
-use crate::storage::log_store;
+use crate::storage::{log_store, media_classify_store};
 
 pub static MEDIA_SCAN_CACHE: Mutex<Option<MediaClassifyResult>> = Mutex::new(None);
 pub static MEDIA_PREVIEW_CACHE: Mutex<Option<ClassifyPreviewResult>> = Mutex::new(None);
@@ -76,6 +76,12 @@ pub async fn scan_media_authors(
     let task_id = Uuid::new_v4().to_string();
     let filters = normalize_media_filters(&media_types);
     let dimension = ClassificationDimension::parse(&classification_dimension)?;
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?;
+    let knowledge = media_classify_store::load(&data_dir)?;
+    let alias_map = build_alias_map(&knowledge.aliases);
     let sources: HashSet<String> = keyword_sources
         .iter()
         .map(|source| source.trim().to_lowercase())
@@ -201,7 +207,16 @@ pub async fn scan_media_authors(
     let all_keywords: Vec<String> = {
         let mut seen: HashSet<String> = HashSet::new();
         let mut combined: Vec<String> = Vec::new();
-        for kw in folder_keywords.iter().chain(metadata_keywords.iter()) {
+        for kw in folder_keywords
+            .iter()
+            .chain(metadata_keywords.iter())
+            .chain(
+                knowledge
+                    .aliases
+                    .iter()
+                    .flat_map(|alias| [&alias.alias, &alias.canonical]),
+            )
+        {
             if kw.chars().count() >= 2 && seen.insert(kw.to_lowercase()) {
                 combined.push(kw.clone());
             }
@@ -286,14 +301,16 @@ pub async fn scan_media_authors(
         let mut candidates: HashMap<String, CandidateScore> = HashMap::new();
         for kw in &final_keywords {
             if let Some(score) = filename_match_score(&file_stem, kw) {
-                add_candidate(&mut candidates, kw, score, "文件名");
+                let canonical = canonical_keyword(kw, &alias_map);
+                add_candidate(&mut candidates, &canonical, score, "文件名");
             }
         }
 
         if sources.contains("folder_name") {
             if let Some(folder_name) = direct_child_folder_name(path, &paths) {
                 if let Some(keyword) = merged_map.get(&folder_name) {
-                    add_candidate(&mut candidates, keyword, 100, "所属子文件夹");
+                    let canonical = canonical_keyword(keyword, &alias_map);
+                    add_candidate(&mut candidates, &canonical, 100, "所属子文件夹");
                 }
             }
         }
@@ -311,7 +328,8 @@ pub async fn scan_media_authors(
                 for kw in &final_keywords {
                     if let Some(score) = metadata_match_score(value, kw, exact_score, partial_score)
                     {
-                        add_candidate(&mut candidates, kw, score, source);
+                        let canonical = canonical_keyword(kw, &alias_map);
+                        add_candidate(&mut candidates, &canonical, score, source);
                     }
                 }
             }
@@ -448,6 +466,7 @@ pub fn preview_media_classify(
     let mut used_targets: HashSet<String> = HashSet::new();
 
     let mut items = Vec::new();
+    let mut learning_hints = Vec::new();
     for group in &scan_result.groups {
         for file in &group.files {
             if !selected.contains(file.path.as_str()) {
@@ -455,6 +474,7 @@ pub fn preview_media_classify(
             }
 
             // 多匹配必须由用户确认；单匹配可使用其唯一的归属关键字。
+            let manually_assigned = request.keyword_assignments.contains_key(&file.path);
             let keyword = match request.keyword_assignments.get(&file.path) {
                 Some(keyword) if file.matched_keywords.contains(keyword) => keyword.clone(),
                 Some(_) => return Err(format!("文件 {} 的归属关键字无效", file.path)),
@@ -482,6 +502,9 @@ pub fn preview_media_classify(
                 action_desc: format!("移动到 {} 并重命名", keyword),
                 size_bytes: file.size_bytes,
             });
+            if manually_assigned {
+                append_learning_hints(&mut learning_hints, file, &keyword);
+            }
         }
     }
 
@@ -513,12 +536,14 @@ pub fn preview_media_classify(
             action_desc: format!("移动到 {} 并重命名", keyword),
             size_bytes: file.size_bytes,
         });
+        append_learning_hints(&mut learning_hints, file, keyword);
     }
 
     let preview = ClassifyPreviewResult {
         task_id: scan_result.task_id,
         total: items.len() as u64,
         items,
+        learning_hints,
     };
 
     let mut cache = MEDIA_PREVIEW_CACHE.lock().map_err(|e| e.to_string())?;
@@ -627,12 +652,36 @@ pub async fn execute_media_classify(app: AppHandle, task_id: String) -> Result<S
     };
 
     log_store::append(&data_dir, &log)?;
+    let succeeded_paths: HashSet<&str> = log
+        .operations
+        .iter()
+        .filter(|operation| operation.status == OperationStatus::Success)
+        .map(|operation| operation.source_path.as_str())
+        .collect();
+    let learned_hints: Vec<AliasLearningHint> = preview
+        .learning_hints
+        .iter()
+        .filter(|hint| succeeded_paths.contains(hint.source_path.as_str()))
+        .cloned()
+        .collect();
+    let learning_error =
+        media_classify_store::record_confirmations(&data_dir, &learned_hints).err();
 
     if failed > 0 {
         return Err(format!("执行完成：{} 成功，{} 失败", succeeded, failed));
     }
 
-    Ok(format!("执行完成：{} 个文件已归类", succeeded))
+    let learning_message = if let Some(error) = learning_error {
+        format!("；别名学习未保存：{}", error)
+    } else if learned_hints.is_empty() {
+        String::new()
+    } else {
+        format!("；已学习 {} 条别名", learned_hints.len())
+    };
+    Ok(format!(
+        "执行完成：{} 个文件已归类{}",
+        succeeded, learning_message
+    ))
 }
 
 /// 构建目标路径：移动到关键字子文件夹 + 重命名为 "关键字-主题.后缀"
@@ -846,6 +895,39 @@ fn path_key(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
+fn build_alias_map(aliases: &[KeywordAlias]) -> HashMap<String, String> {
+    let mut result = HashMap::new();
+    for alias in aliases {
+        let key = normalize_match_text(&alias.alias);
+        let canonical = alias.canonical.trim();
+        if !key.is_empty() && !canonical.is_empty() {
+            result.insert(key, canonical.to_string());
+        }
+    }
+    result
+}
+
+fn canonical_keyword(keyword: &str, aliases: &HashMap<String, String>) -> String {
+    aliases
+        .get(&normalize_match_text(keyword))
+        .cloned()
+        .unwrap_or_else(|| keyword.to_string())
+}
+
+fn append_learning_hints(hints: &mut Vec<AliasLearningHint>, file: &MediaFile, canonical: &str) {
+    let canonical_key = normalize_match_text(canonical);
+    for alias in &file.matched_keywords {
+        if normalize_match_text(alias) == canonical_key {
+            continue;
+        }
+        hints.push(AliasLearningHint {
+            source_path: file.path.clone(),
+            alias: alias.clone(),
+            canonical: canonical.to_string(),
+        });
+    }
+}
+
 fn add_candidate(
     candidates: &mut HashMap<String, CandidateScore>,
     keyword: &str,
@@ -988,5 +1070,19 @@ mod tests {
         assert_eq!(candidates["Alice"].score, 100);
         assert!(candidates["Alice"].score >= AUTO_CLASSIFY_THRESHOLD);
         assert!(candidates["Alice"].score - candidates["Album"].score >= AUTO_CLASSIFY_MARGIN);
+    }
+
+    #[test]
+    fn historical_aliases_resolve_to_the_canonical_keyword() {
+        let aliases = vec![KeywordAlias {
+            alias: "Jay Chou".into(),
+            canonical: "周杰伦".into(),
+            confirmations: 3,
+            updated_at: String::new(),
+        }];
+        let alias_map = build_alias_map(&aliases);
+
+        assert_eq!(canonical_keyword("jay chou", &alias_map), "周杰伦");
+        assert_eq!(canonical_keyword("Other", &alias_map), "Other");
     }
 }
