@@ -10,6 +10,7 @@ import {
 } from "../utils/tauriApi";
 import type {
   KeywordGroup,
+  ClassificationDimension,
   ClassifyPreviewResult,
   MediaClassifyResult,
   ProgressEvent,
@@ -30,6 +31,15 @@ const keywordSourceOptions = ref([
   { key: "album", label: "专辑名", checked: true },
   { key: "composer", label: "作曲家", checked: true },
 ]);
+const classificationDimension = ref<ClassificationDimension>("creator");
+const classificationDimensionOptions: {
+  key: ClassificationDimension;
+  label: string;
+}[] = [
+  { key: "creator", label: "按创作者/主体" },
+  { key: "album", label: "按专辑/作品集" },
+  { key: "folder", label: "按现有文件夹" },
+];
 const scanning = ref(false);
 const executing = ref(false);
 const result = ref<MediaClassifyResult | null>(null);
@@ -62,7 +72,7 @@ const checkedPaths = computed(() => {
       .filter(
         (file) =>
           file.checked &&
-          (file.matched_keywords.length <= 1 || keywordAssignments.value[file.path]),
+          (!file.requires_confirmation || keywordAssignments.value[file.path]),
       )
       .map((file) => file.path),
   );
@@ -83,7 +93,7 @@ const totalSelectedSize = computed(() => {
         .filter(
           (file) =>
             file.checked &&
-            (file.matched_keywords.length <= 1 || keywordAssignments.value[file.path]),
+            (!file.requires_confirmation || keywordAssignments.value[file.path]),
         )
         .reduce((groupSum, file) => groupSum + file.size_bytes, 0)
     );
@@ -201,6 +211,7 @@ async function runScan() {
       recursive.value,
       selectedMediaTypes.value,
       selectedKeywordSources.value,
+      classificationDimension.value,
     );
   } catch (error) {
     alert("扫描失败: " + error);
@@ -220,7 +231,7 @@ function groupCheckedCount(group: KeywordGroup): number {
   return group.files.filter(
     (file) =>
       file.checked &&
-      (file.matched_keywords.length <= 1 || keywordAssignments.value[file.path]),
+      (!file.requires_confirmation || keywordAssignments.value[file.path]),
   ).length;
 }
 
@@ -252,7 +263,7 @@ async function generatePreview() {
   for (const group of result.value.groups) {
     for (const file of group.files) {
       if (file.checked && !assignments[file.path]) {
-        if (file.matched_keywords.length === 1) {
+        if (!file.requires_confirmation) {
           assignments[file.path] = group.keyword;
         }
       }
@@ -378,6 +389,19 @@ function mediaIcon(type: string): string {
         </label>
       </div>
 
+      <div class="filter-row">
+        <label class="filter-label" for="classification-dimension">归类维度</label>
+        <select id="classification-dimension" v-model="classificationDimension" class="keyword-select">
+          <option
+            v-for="option in classificationDimensionOptions"
+            :key="option.key"
+            :value="option.key"
+          >
+            {{ option.label }}
+          </option>
+        </select>
+      </div>
+
       <button
         class="btn-scan"
         :disabled="
@@ -412,7 +436,7 @@ function mediaIcon(type: string): string {
         </div>
         <div class="stat-card">
           <span class="stat-value warning">{{ remainingUnmatched }}</span>
-          <span class="stat-label">未匹配</span>
+          <span class="stat-label">待确认</span>
         </div>
         <div class="stat-card">
           <span class="stat-value">{{ totalSelected }}</span>
@@ -459,15 +483,17 @@ function mediaIcon(type: string): string {
       </div>
 
       <!-- 未匹配文件提示 -->
-      <div v-if="unmatchedFiles.length > 0" class="unmatched-section">
-        <div class="panel-title">📭 未匹配文件（请手动选择关键字归类）</div>
+        <div v-if="unmatchedFiles.length > 0" class="unmatched-section">
+          <div class="panel-title">📭 待确认文件（默认保持原位）</div>
         <div
           v-for="file in unmatchedFiles"
           :key="file.path"
           class="unmatched-row"
         >
           <input type="checkbox" v-model="file.checked" />
-          <span class="unmatched-name">{{ file.file_name }}</span>
+          <span class="unmatched-name" :title="file.evidence.join('、')">
+            {{ file.file_name }} · 置信度 {{ file.confidence }}%
+          </span>
           <select
             class="keyword-select"
             :value="keywordAssignments[file.path] || ''"
@@ -540,7 +566,7 @@ function mediaIcon(type: string): string {
 
         <div v-if="remainingUnmatched > 0" class="message-box">
           有
-          {{ remainingUnmatched }} 个文件未匹配到任何关键字，将保持原位不动。
+          {{ remainingUnmatched }} 个文件因无可靠归属或候选分数接近，将保持原位不动。
         </div>
 
         <div v-if="executionMessage" class="message-box success-msg">

@@ -207,6 +207,7 @@ export interface DuplicateFile {
 
 export interface MediaClassifyResult {
   task_id: string;
+  classification_dimension: ClassificationDimension;
   scanned_count: number;
   total_keywords: number;
   no_match_count: number;
@@ -235,9 +236,14 @@ export interface MediaFile {
   size_bytes: number;
   media_type: "image" | "audio" | "video" | "ebook" | "unknown";
   matched_keywords: string[];
+  confidence: number;
+  evidence: string[];
+  requires_confirmation: boolean;
   modified_at: string;
   checked: boolean;
 }
+
+export type ClassificationDimension = "creator" | "album" | "folder";
 
 export interface ClassifyExecuteRequest {
   task_id: string;

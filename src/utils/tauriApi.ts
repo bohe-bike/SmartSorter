@@ -6,6 +6,7 @@ import type {
   RuleSet,
   DuplicateResult,
   MediaClassifyResult,
+  ClassificationDimension,
   ClassifyExecuteRequest,
   ClassifyPreviewResult,
   ExecutionLog,
@@ -71,12 +72,14 @@ export async function scanMediaAuthors(
   recursive: boolean,
   mediaTypes: string[],
   keywordSources: string[],
+  classificationDimension: ClassificationDimension,
 ): Promise<MediaClassifyResult> {
   return invoke<MediaClassifyResult>("scan_media_authors", {
     paths,
     recursive,
     mediaTypes,
     keywordSources,
+    classificationDimension,
   });
 }
 

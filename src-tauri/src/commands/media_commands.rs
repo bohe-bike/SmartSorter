@@ -18,6 +18,52 @@ use crate::storage::log_store;
 pub static MEDIA_SCAN_CACHE: Mutex<Option<MediaClassifyResult>> = Mutex::new(None);
 pub static MEDIA_PREVIEW_CACHE: Mutex<Option<ClassifyPreviewResult>> = Mutex::new(None);
 
+const AUTO_CLASSIFY_THRESHOLD: u8 = 80;
+const AUTO_CLASSIFY_MARGIN: u8 = 15;
+
+#[derive(Debug, Clone, Copy)]
+enum ClassificationDimension {
+    Creator,
+    Album,
+    Folder,
+}
+
+impl ClassificationDimension {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value.trim().to_lowercase().as_str() {
+            "creator" => Ok(Self::Creator),
+            "album" => Ok(Self::Album),
+            "folder" => Ok(Self::Folder),
+            _ => Err("归类维度无效，应为 creator、album 或 folder".into()),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Creator => "creator",
+            Self::Album => "album",
+            Self::Folder => "folder",
+        }
+    }
+
+    fn allows_source(self, source: &str) -> bool {
+        match self {
+            Self::Creator => matches!(
+                source,
+                "folder_name" | "artist" | "album_artist" | "composer"
+            ),
+            Self::Album => matches!(source, "folder_name" | "album"),
+            Self::Folder => source == "folder_name",
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct CandidateScore {
+    score: u8,
+    evidence: Vec<String>,
+}
+
 #[command]
 pub async fn scan_media_authors(
     app: AppHandle,
@@ -25,10 +71,22 @@ pub async fn scan_media_authors(
     recursive: bool,
     media_types: Vec<String>,
     keyword_sources: Vec<String>,
+    classification_dimension: String,
 ) -> Result<MediaClassifyResult, String> {
     let task_id = Uuid::new_v4().to_string();
     let filters = normalize_media_filters(&media_types);
-    let sources: HashSet<String> = keyword_sources.iter().map(|s| s.to_lowercase()).collect();
+    let dimension = ClassificationDimension::parse(&classification_dimension)?;
+    let sources: HashSet<String> = keyword_sources
+        .iter()
+        .map(|source| source.trim().to_lowercase())
+        .filter(|source| dimension.allows_source(source))
+        .collect();
+    if sources.is_empty() {
+        return Err(format!(
+            "归类维度“{}”没有启用可用的关键字来源",
+            dimension.as_str()
+        ));
+    }
 
     // ① 收集当前文件夹下的子文件夹名作为关键字
     let mut folder_keywords: Vec<String> = Vec::new();
@@ -199,12 +257,12 @@ pub async fn scan_media_authors(
         });
     }
 
-    // ⑥ 匹配文件到关键字（文件名关键字优先）
+    // ⑥ 汇集证据并评分。只有高置信度且显著领先的候选才自动归类。
     let mut no_match_count = 0u64;
     let mut unmatched_files: Vec<MediaFile> = Vec::new();
     let mut grouped: HashMap<String, Vec<MediaFile>> = HashMap::new();
 
-    for (index, (path, size_bytes, _meta)) in media_files.iter().enumerate() {
+    for (index, (path, size_bytes, meta)) in media_files.iter().enumerate() {
         let _ = app.emit(
             "progress",
             ProgressPayload {
@@ -225,85 +283,70 @@ pub async fn scan_media_authors(
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
 
-        // 先从文件名和所属的直接子文件夹匹配关键字（大小写不敏感）。
-        // 子文件夹是已声明的关键字来源，文件名不含作者时也应能归入该文件夹。
-        let mut matched: Vec<String> = Vec::new();
-        let file_stem_lower = file_stem.to_lowercase();
+        let mut candidates: HashMap<String, CandidateScore> = HashMap::new();
         for kw in &final_keywords {
-            if file_stem_lower.contains(&kw.to_lowercase()) {
-                matched.push(kw.clone());
+            if let Some(score) = filename_match_score(&file_stem, kw) {
+                add_candidate(&mut candidates, kw, score, "文件名");
             }
         }
 
         if sources.contains("folder_name") {
             if let Some(folder_name) = direct_child_folder_name(path, &paths) {
                 if let Some(keyword) = merged_map.get(&folder_name) {
-                    if !matched.contains(keyword) {
-                        matched.push(keyword.clone());
+                    add_candidate(&mut candidates, keyword, 100, "所属子文件夹");
+                }
+            }
+        }
+
+        for (source, value, exact_score, partial_score) in [
+            ("artist", meta.artist.as_deref(), 95, 60),
+            ("album_artist", meta.album_artist.as_deref(), 92, 60),
+            ("album", meta.album.as_deref(), 95, 60),
+            ("composer", meta.composer.as_deref(), 80, 55),
+        ] {
+            if !sources.contains(source) {
+                continue;
+            }
+            if let Some(value) = value {
+                for kw in &final_keywords {
+                    if let Some(score) = metadata_match_score(value, kw, exact_score, partial_score)
+                    {
+                        add_candidate(&mut candidates, kw, score, source);
                     }
                 }
             }
         }
 
-        // 如果文件名和目录均未匹配到，再从用户启用的元数据字段尝试。
-        if matched.is_empty() {
-            let meta = &media_files[index].2;
-            let mut meta_values: Vec<&str> = Vec::new();
-            if sources.contains("artist") {
-                meta_values.extend(meta.artist.as_deref());
-            }
-            if sources.contains("album_artist") {
-                meta_values.extend(meta.album_artist.as_deref());
-            }
-            if sources.contains("album") {
-                meta_values.extend(meta.album.as_deref());
-            }
-            if sources.contains("composer") {
-                meta_values.extend(meta.composer.as_deref());
-            }
-
-            for kw in &final_keywords {
-                let kw_lower = kw.to_lowercase();
-                if meta_values.iter().any(|v| {
-                    let v_lower = v.to_lowercase();
-                    v_lower.contains(&kw_lower) || kw_lower.contains(&v_lower)
-                }) {
-                    if !matched.contains(kw) {
-                        matched.push(kw.clone());
-                    }
-                }
-            }
-        }
-
-        if matched.is_empty() {
-            no_match_count += 1;
-            let modified_at = std::fs::metadata(path)
-                .ok()
-                .and_then(|m| m.modified().ok())
-                .map(|t| DateTime::<Local>::from(t).to_rfc3339())
-                .unwrap_or_default();
-
-            let media_file = MediaFile {
-                path: path.to_string_lossy().into_owned(),
-                file_name,
-                size_bytes: *size_bytes,
-                media_type: metadata::media_type_label(path)
-                    .unwrap_or("unknown")
-                    .to_string(),
-                matched_keywords: Vec::new(),
-                modified_at,
-                checked: true,
-            };
-            unmatched_files.push(media_file);
-            continue;
-        }
+        let mut ranked: Vec<(String, CandidateScore)> = candidates.into_iter().collect();
+        ranked.sort_by(|(left_keyword, left), (right_keyword, right)| {
+            right.score.cmp(&left.score).then_with(|| {
+                left_keyword
+                    .to_lowercase()
+                    .cmp(&right_keyword.to_lowercase())
+            })
+        });
+        let matched_keywords: Vec<String> =
+            ranked.iter().map(|(keyword, _)| keyword.clone()).collect();
+        let confidence = ranked
+            .first()
+            .map(|(_, candidate)| candidate.score)
+            .unwrap_or(0);
+        let evidence = ranked
+            .first()
+            .map(|(_, candidate)| candidate.evidence.clone())
+            .unwrap_or_default();
+        let runner_up = ranked
+            .get(1)
+            .map(|(_, candidate)| candidate.score)
+            .unwrap_or(0);
+        let auto_classifiable = confidence >= AUTO_CLASSIFY_THRESHOLD
+            && confidence.saturating_sub(runner_up) >= AUTO_CLASSIFY_MARGIN;
 
         let modified_at = std::fs::metadata(path)
             .ok()
             .and_then(|m| m.modified().ok())
             .map(|t| DateTime::<Local>::from(t).to_rfc3339())
             .unwrap_or_default();
-
         let media_file = MediaFile {
             path: path.to_string_lossy().into_owned(),
             file_name,
@@ -311,13 +354,24 @@ pub async fn scan_media_authors(
             media_type: metadata::media_type_label(path)
                 .unwrap_or("unknown")
                 .to_string(),
-            matched_keywords: matched.clone(),
+            matched_keywords,
+            confidence,
+            evidence,
+            requires_confirmation: !auto_classifiable,
             modified_at,
-            checked: true,
+            checked: auto_classifiable,
         };
 
-        // 归入第一个匹配的关键字组（多匹配在前端让用户选）
-        let primary_keyword = matched.first().unwrap().clone();
+        if !auto_classifiable {
+            no_match_count += 1;
+            unmatched_files.push(media_file);
+            continue;
+        }
+
+        let primary_keyword = ranked
+            .first()
+            .map(|(keyword, _)| keyword.clone())
+            .expect("自动归类必须存在候选关键字");
         grouped.entry(primary_keyword).or_default().push(media_file);
     }
 
@@ -354,6 +408,7 @@ pub async fn scan_media_authors(
     let result = MediaClassifyResult {
         task_id,
         source_paths: paths.clone(),
+        classification_dimension: dimension.as_str().to_string(),
         scanned_count: total,
         total_keywords: groups.len() as u64,
         no_match_count,
@@ -791,6 +846,78 @@ fn path_key(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
+fn add_candidate(
+    candidates: &mut HashMap<String, CandidateScore>,
+    keyword: &str,
+    score: u8,
+    evidence: &str,
+) {
+    let candidate = candidates.entry(keyword.to_string()).or_default();
+    candidate.score = candidate.score.saturating_add(score).min(100);
+    if !candidate.evidence.iter().any(|item| item == evidence) {
+        candidate.evidence.push(evidence.to_string());
+    }
+}
+
+fn filename_match_score(file_stem: &str, keyword: &str) -> Option<u8> {
+    text_match_score(file_stem, keyword, 90, 82, 55)
+}
+
+fn metadata_match_score(
+    value: &str,
+    keyword: &str,
+    exact_score: u8,
+    partial_score: u8,
+) -> Option<u8> {
+    text_match_score(value, keyword, exact_score, partial_score, partial_score)
+}
+
+fn text_match_score(
+    value: &str,
+    keyword: &str,
+    exact_score: u8,
+    boundary_score: u8,
+    partial_score: u8,
+) -> Option<u8> {
+    let value = normalize_match_text(value);
+    let keyword = normalize_match_text(keyword);
+    if value.is_empty() || keyword.is_empty() {
+        return None;
+    }
+    if value == keyword {
+        return Some(exact_score);
+    }
+
+    let mut best = None;
+    for (start, _) in value.match_indices(&keyword) {
+        let end = start + keyword.len();
+        let before = value[..start].chars().next_back();
+        let after = value[end..].chars().next();
+        let has_boundaries =
+            before.map_or(true, is_match_boundary) && after.map_or(true, is_match_boundary);
+        let score = if has_boundaries {
+            boundary_score
+        } else {
+            partial_score
+        };
+        best = Some(best.unwrap_or(0).max(score));
+    }
+    best
+}
+
+fn normalize_match_text(value: &str) -> String {
+    value
+        .trim()
+        .to_lowercase()
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect()
+}
+
+fn is_match_boundary(ch: char) -> bool {
+    !ch.is_alphanumeric()
+}
+
 fn normalize_media_filters(filters: &[String]) -> Vec<String> {
     filters
         .iter()
@@ -834,5 +961,32 @@ mod tests {
         assert_eq!(merged.get("小凛蝶子"), Some(&"蝶子".to_string()));
         assert_eq!(merged.get("蝶子"), Some(&"蝶子".to_string()));
         assert_eq!(merged.get("Other"), Some(&"Other".to_string()));
+    }
+
+    #[test]
+    fn classification_dimension_filters_incompatible_sources() {
+        let creator = ClassificationDimension::parse("creator").unwrap();
+        let album = ClassificationDimension::parse("album").unwrap();
+
+        assert!(creator.allows_source("artist"));
+        assert!(!creator.allows_source("album"));
+        assert!(album.allows_source("album"));
+        assert!(!album.allows_source("artist"));
+    }
+
+    #[test]
+    fn scoring_requires_a_strong_and_clear_winner_for_auto_classification() {
+        assert_eq!(filename_match_score("Alice - Live", "Alice"), Some(82));
+        assert_eq!(filename_match_score("NotAliceLive", "Alice"), Some(55));
+        assert_eq!(metadata_match_score("Alice", "Alice", 95, 60), Some(95));
+
+        let mut candidates = HashMap::new();
+        add_candidate(&mut candidates, "Alice", 95, "artist");
+        add_candidate(&mut candidates, "Alice", 55, "文件名");
+        add_candidate(&mut candidates, "Album", 60, "文件名");
+
+        assert_eq!(candidates["Alice"].score, 100);
+        assert!(candidates["Alice"].score >= AUTO_CLASSIFY_THRESHOLD);
+        assert!(candidates["Alice"].score - candidates["Album"].score >= AUTO_CLASSIFY_MARGIN);
     }
 }
