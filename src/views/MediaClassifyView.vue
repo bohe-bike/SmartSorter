@@ -58,7 +58,13 @@ const selectedKeywordSources = computed(() =>
 const checkedPaths = computed(() => {
   if (!result.value) return [] as string[];
   const groupedPaths = result.value.groups.flatMap((group) =>
-    group.files.filter((file) => file.checked).map((file) => file.path),
+    group.files
+      .filter(
+        (file) =>
+          file.checked &&
+          (file.matched_keywords.length <= 1 || keywordAssignments.value[file.path]),
+      )
+      .map((file) => file.path),
   );
   const unmatchedPaths = result.value.unmatched_files
     .filter((file) => file.checked && keywordAssignments.value[file.path])
@@ -74,7 +80,11 @@ const totalSelectedSize = computed(() => {
     return (
       sum +
       group.files
-        .filter((file) => file.checked)
+        .filter(
+          (file) =>
+            file.checked &&
+            (file.matched_keywords.length <= 1 || keywordAssignments.value[file.path]),
+        )
         .reduce((groupSum, file) => groupSum + file.size_bytes, 0)
     );
   }, 0);
@@ -207,7 +217,11 @@ function toggleGroup(group: KeywordGroup, checked: boolean) {
 }
 
 function groupCheckedCount(group: KeywordGroup): number {
-  return group.files.filter((file) => file.checked).length;
+  return group.files.filter(
+    (file) =>
+      file.checked &&
+      (file.matched_keywords.length <= 1 || keywordAssignments.value[file.path]),
+  ).length;
 }
 
 function assignKeyword(filePath: string, keyword: string) {
@@ -238,7 +252,9 @@ async function generatePreview() {
   for (const group of result.value.groups) {
     for (const file of group.files) {
       if (file.checked && !assignments[file.path]) {
-        assignments[file.path] = group.keyword;
+        if (file.matched_keywords.length === 1) {
+          assignments[file.path] = group.keyword;
+        }
       }
     }
   }
@@ -429,11 +445,12 @@ function mediaIcon(type: string): string {
           <span class="multi-match-name">{{ mf.fileName }}</span>
           <select
             class="keyword-select"
-            :value="keywordAssignments[mf.path] || mf.keywords[0]"
+            :value="keywordAssignments[mf.path] || ''"
             @change="
               assignKeyword(mf.path, ($event.target as HTMLSelectElement).value)
             "
           >
+            <option value="" disabled>请选择归属</option>
             <option v-for="kw in mf.keywords" :key="kw" :value="kw">
               {{ kw }}
             </option>

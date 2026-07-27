@@ -32,9 +32,9 @@ pub struct MediaMetadata {
 pub fn get_media_type(path: &Path) -> Option<MediaType> {
     let ext = path.extension()?.to_string_lossy().to_ascii_lowercase();
     match ext.as_str() {
-        "jpg" | "jpeg" | "png" | "tif" | "tiff" | "webp" => Some(MediaType::Image),
+        "jpg" | "jpeg" | "png" | "gif" | "bmp" | "tif" | "tiff" | "webp" => Some(MediaType::Image),
         "mp3" | "flac" | "aac" | "m4a" | "ogg" | "wav" => Some(MediaType::Audio),
-        "mp4" | "m4v" | "mov" => Some(MediaType::Video),
+        "mp4" | "m4v" | "mov" | "mkv" | "avi" | "wmv" => Some(MediaType::Video),
         "epub" | "pdf" | "mobi" | "azw3" | "cbz" | "cbr" => Some(MediaType::Ebook),
         _ => None,
     }
@@ -329,5 +329,35 @@ fn normalize_author(value: String) -> Option<String> {
         None
     } else {
         Some(normalized)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn recognizes_documented_media_extensions() {
+        assert_eq!(
+            get_media_type(Path::new("cover.gif")),
+            Some(MediaType::Image)
+        );
+        assert_eq!(
+            get_media_type(Path::new("cover.bmp")),
+            Some(MediaType::Image)
+        );
+        assert_eq!(
+            get_media_type(Path::new("video.mkv")),
+            Some(MediaType::Video)
+        );
+        assert_eq!(
+            get_media_type(Path::new("video.avi")),
+            Some(MediaType::Video)
+        );
+        assert_eq!(
+            get_media_type(Path::new("video.wmv")),
+            Some(MediaType::Video)
+        );
     }
 }
