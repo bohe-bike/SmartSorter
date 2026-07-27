@@ -1,4 +1,4 @@
-use crate::engine::{matcher, scanner, transformer};
+use crate::engine::{hasher, matcher, scanner, transformer};
 use crate::models::preview::{
     ChangeDetail, Conflict, FileSnapshot, FileTarget, PlannedOperation, PreviewError, PreviewItem,
     PreviewRequest, PreviewResult, PreviewSummary,
@@ -42,6 +42,7 @@ pub async fn analyze_preview(
     let (all_scanned_files, mut scan_errors) = tauri::async_runtime::spawn_blocking(move || {
         let mut files: Vec<(String, std::path::PathBuf)> = Vec::new();
         let mut errs: Vec<PreviewError> = Vec::new();
+        let mut seen_paths = HashSet::new();
         for source in &source_paths_clone {
             let root = std::path::Path::new(source);
             if !root.exists() {
@@ -54,7 +55,9 @@ pub async fn analyze_preview(
             }
             let scanned = scanner::scan_directory(root, request.recursive, request.max_depth);
             for f in scanned {
-                files.push((source.clone(), f));
+                if seen_paths.insert(path_key(&f)) {
+                    files.push((source.clone(), f));
+                }
             }
         }
         (files, errs)
@@ -83,7 +86,7 @@ pub async fn analyze_preview(
     let task_id_clone = task_id.clone();
     let (items, match_errors) = tauri::async_runtime::spawn_blocking(move || {
         let mut items: Vec<PreviewItem> = Vec::new();
-        let errs: Vec<PreviewError> = Vec::new();
+        let mut errs: Vec<PreviewError> = Vec::new();
         let mut reserved_targets: HashSet<String> = HashSet::new();
         for (idx, (_source, file_path)) in all_scanned_files.iter().enumerate() {
             if idx % 50 == 0 {
@@ -107,24 +110,16 @@ pub async fn analyze_preview(
                     continue;
                 }
 
-                let meta = std::fs::metadata(file_path).ok();
-                let source_snapshot = FileSnapshot {
-                    path: file_path.to_string_lossy().into_owned(),
-                    name: file_path
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_default(),
-                    size_bytes: meta.as_ref().map(|m| m.len()).unwrap_or(0),
-                    created_at: meta
-                        .as_ref()
-                        .and_then(|m| m.created().ok())
-                        .map(|t| chrono::DateTime::<Local>::from(t).to_rfc3339())
-                        .unwrap_or_default(),
-                    modified_at: meta
-                        .as_ref()
-                        .and_then(|m| m.modified().ok())
-                        .map(|t| chrono::DateTime::<Local>::from(t).to_rfc3339())
-                        .unwrap_or_default(),
+                let source_snapshot = match source_snapshot(file_path) {
+                    Ok(snapshot) => snapshot,
+                    Err(message) => {
+                        errs.push(PreviewError {
+                            path: file_path.to_string_lossy().into_owned(),
+                            error: "snapshot_failed".into(),
+                            message,
+                        });
+                        break;
+                    }
                 };
 
                 let mut ctx = transformer::TransformContext::default();
@@ -141,7 +136,7 @@ pub async fn analyze_preview(
                         Action::Delete(_) => "delete",
                     };
 
-                    if matches!(action, Action::Delete(_)) {
+                    if let Action::Delete(params) = action {
                         changes.push(ChangeDetail {
                             rule_id: rule.id.clone(),
                             rule_name: rule.name.clone(),
@@ -153,6 +148,9 @@ pub async fn analyze_preview(
                             source_path: target_path.to_string_lossy().into_owned(),
                             target_path: String::new(),
                             conflict_strategy: None,
+                            expected_target_exists: false,
+                            expected_target_hash: None,
+                            requires_confirmation: params.confirm_required,
                         });
                         break; // 删除后没有可继续操作的文件状态。
                     }
@@ -175,6 +173,12 @@ pub async fn analyze_preview(
                     };
                     let (resolved_target, action_conflict) =
                         resolve_target(base_target, &strategy, &mut reserved_targets);
+                    let expected_target_exists = resolved_target.exists();
+                    let expected_target_hash = if expected_target_exists {
+                        hasher::compute_sha256(&resolved_target).ok()
+                    } else {
+                        None
+                    };
                     if conflict.is_none() {
                         conflict = action_conflict;
                     }
@@ -194,6 +198,9 @@ pub async fn analyze_preview(
                         source_path: target_path.to_string_lossy().into_owned(),
                         target_path: resolved_target.to_string_lossy().into_owned(),
                         conflict_strategy: Some(strategy),
+                        expected_target_exists,
+                        expected_target_hash,
+                        requires_confirmation: false,
                     });
                     target_path = resolved_target;
                 }
@@ -352,7 +359,34 @@ fn file_snapshot(path: &Path) -> FileSnapshot {
             .and_then(|meta| meta.modified().ok())
             .map(|time| chrono::DateTime::<Local>::from(time).to_rfc3339())
             .unwrap_or_default(),
+        sha256: String::new(),
     }
+}
+
+fn source_snapshot(path: &Path) -> Result<FileSnapshot, String> {
+    let metadata =
+        std::fs::metadata(path).map_err(|error| format!("读取文件信息失败: {}", error))?;
+    let sha256 =
+        hasher::compute_sha256(path).map_err(|error| format!("计算 SHA-256 失败: {}", error))?;
+    Ok(FileSnapshot {
+        path: path.to_string_lossy().into_owned(),
+        name: path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        size_bytes: metadata.len(),
+        created_at: metadata
+            .created()
+            .ok()
+            .map(|time| chrono::DateTime::<Local>::from(time).to_rfc3339())
+            .unwrap_or_default(),
+        modified_at: metadata
+            .modified()
+            .ok()
+            .map(|time| chrono::DateTime::<Local>::from(time).to_rfc3339())
+            .unwrap_or_default(),
+        sha256,
+    })
 }
 
 #[cfg(target_os = "windows")]

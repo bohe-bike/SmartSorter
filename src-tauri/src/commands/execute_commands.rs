@@ -1,11 +1,12 @@
-use crate::engine::{executor, undo};
+use crate::engine::{executor, hasher, undo};
 use crate::models::log::{ExecutionLog, ExecutionSummary, Operation, OperationStatus, UndoStatus};
-use crate::models::preview::{PlannedOperation, PreviewResult};
+use crate::models::preview::{ExecuteTaskRequest, FileSnapshot, PlannedOperation, PreviewResult};
 use crate::models::progress::ProgressPayload;
 use crate::models::rule::ConflictStrategy;
 use crate::storage::log_store;
 use chrono::Local;
 use std::collections::HashSet;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use tauri::command;
@@ -16,17 +17,19 @@ use uuid::Uuid;
 pub static PREVIEW_CACHE: Mutex<Option<PreviewResult>> = Mutex::new(None);
 
 #[command]
-pub async fn execute_task(
-    app: AppHandle,
-    task_id: String,
-    checked_ids: Vec<String>,
-) -> Result<String, String> {
+pub async fn execute_task(app: AppHandle, request: ExecuteTaskRequest) -> Result<String, String> {
     let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let task_id = request.task_id;
 
     // 从缓存中 clone 出所需数据后立即释放锁，避免在 async 中长期持有 Mutex
-    let checked_set: HashSet<&str> = checked_ids.iter().map(|s| s.as_str()).collect();
+    let checked_set: HashSet<&str> = request.checked_ids.iter().map(|id| id.as_str()).collect();
+    let confirmed_delete_set: HashSet<&str> = request
+        .confirmed_delete_ids
+        .iter()
+        .map(|id| id.as_str())
+        .collect();
     let (items, rule_set_name) = {
-        let cache = PREVIEW_CACHE.lock().map_err(|e| e.to_string())?;
+        let mut cache = PREVIEW_CACHE.lock().map_err(|e| e.to_string())?;
         let preview = cache
             .as_ref()
             .ok_or_else(|| "没有可用的预览结果，请先执行分析预览".to_string())?;
@@ -39,7 +42,18 @@ pub async fn execute_task(
             .filter(|item| checked_set.contains(item.id.as_str()))
             .cloned()
             .collect::<Vec<_>>();
-        (filtered, preview.rule_set_name.clone())
+        if let Some(item) = filtered.iter().find(|item| {
+            requires_delete_confirmation(&item.operations)
+                && !confirmed_delete_set.contains(item.id.as_str())
+        }) {
+            return Err(format!("删除操作需要用户确认: {}", item.source.path));
+        }
+        let rule_set_name = preview.rule_set_name.clone();
+        if !filtered.is_empty() {
+            // 一次执行尝试后即让预览失效，避免部分失败时重复运行旧计划。
+            *cache = None;
+        }
+        (filtered, rule_set_name)
     }; // MutexGuard 在此释放
 
     let start = std::time::Instant::now();
@@ -54,6 +68,34 @@ pub async fn execute_task(
     let mut current_operation = 0u64;
 
     for item in &items {
+        if let Err(error) = validate_source_snapshot(&item.source) {
+            for planned in &item.operations {
+                current_operation += 1;
+                let _ = app.emit(
+                    "progress",
+                    ProgressPayload {
+                        task_id: task_id.clone(),
+                        current: current_operation,
+                        total: total_operations,
+                        current_file: planned.source_path.clone(),
+                        phase: "executing".into(),
+                    },
+                );
+                skipped += 1;
+                operations.push(Operation {
+                    op_id: Uuid::new_v4().to_string(),
+                    action: planned.action_type.clone(),
+                    source_path: planned.source_path.clone(),
+                    target_path: planned.target_path.clone(),
+                    status: OperationStatus::Skipped,
+                    error_message: Some(format!("预览已过期，已跳过: {}", error)),
+                    reversible: false,
+                    target_hash: None,
+                });
+            }
+            continue;
+        }
+
         let mut blocked = false;
         for planned in &item.operations {
             current_operation += 1;
@@ -78,6 +120,7 @@ pub async fn execute_task(
                     status: OperationStatus::Skipped,
                     error_message: Some("前置操作未成功，已跳过".into()),
                     reversible: false,
+                    target_hash: None,
                 });
                 continue;
             }
@@ -94,6 +137,12 @@ pub async fn execute_task(
                     blocked = true;
                 }
             }
+            let target_hash = if outcome.status == OperationStatus::Success && outcome.reversible {
+                hasher::compute_sha256(Path::new(&outcome.target_path)).ok()
+            } else {
+                None
+            };
+            let reversible = outcome.reversible && target_hash.is_some();
             operations.push(Operation {
                 op_id: Uuid::new_v4().to_string(),
                 action: planned.action_type.clone(),
@@ -101,7 +150,8 @@ pub async fn execute_task(
                 target_path: outcome.target_path,
                 status: outcome.status,
                 error_message: outcome.error_message,
-                reversible: outcome.reversible,
+                reversible,
+                target_hash,
             });
         }
     }
@@ -193,7 +243,15 @@ fn execute_planned_operation(planned: &PlannedOperation) -> ExecutionOutcome {
         .conflict_strategy
         .clone()
         .unwrap_or(ConflictStrategy::Skip);
-    let mut overwrote = false;
+    if strategy == ConflictStrategy::Overwrite && !target.exists() && planned.expected_target_exists
+    {
+        return ExecutionOutcome {
+            status: OperationStatus::Skipped,
+            target_path: target.to_string_lossy().into_owned(),
+            error_message: Some("目标文件在预览后已不存在，已跳过覆盖".into()),
+            reversible: false,
+        };
+    }
 
     if target.exists() {
         match strategy {
@@ -206,33 +264,20 @@ fn execute_planned_operation(planned: &PlannedOperation) -> ExecutionOutcome {
                 }
             }
             ConflictStrategy::Overwrite => {
-                if let Err(error) = std::fs::remove_file(&target) {
-                    return ExecutionOutcome {
-                        status: OperationStatus::Failed,
-                        target_path: target.to_string_lossy().into_owned(),
-                        error_message: Some(format!("删除冲突目标失败: {}", error)),
-                        reversible: false,
-                    };
-                }
-                overwrote = true;
+                return execute_overwrite(planned, source, &target);
             }
             ConflictStrategy::AutoRename => target = next_available_target(&target),
         }
     }
 
-    let result = match planned.action_type.as_str() {
-        "rename" => executor::safe_rename(source, &target),
-        "move" => executor::safe_move(source, &target),
-        "copy" => executor::safe_copy(source, &target),
-        _ => Err("未知操作类型".into()),
-    };
+    let result = run_file_operation(&planned.action_type, source, &target);
 
     match result {
         Ok(()) => ExecutionOutcome {
             status: OperationStatus::Success,
             target_path: target.to_string_lossy().into_owned(),
             error_message: None,
-            reversible: !overwrote,
+            reversible: true,
         },
         Err(error) => ExecutionOutcome {
             status: OperationStatus::Failed,
@@ -241,6 +286,134 @@ fn execute_planned_operation(planned: &PlannedOperation) -> ExecutionOutcome {
             reversible: false,
         },
     }
+}
+
+fn execute_overwrite(planned: &PlannedOperation, source: &Path, target: &Path) -> ExecutionOutcome {
+    if let Err(error) = validate_overwrite_target(planned, target) {
+        return ExecutionOutcome {
+            status: OperationStatus::Skipped,
+            target_path: target.to_string_lossy().into_owned(),
+            error_message: Some(error),
+            reversible: false,
+        };
+    }
+
+    let backup = match move_target_to_backup(target) {
+        Ok(backup) => backup,
+        Err(error) => {
+            return ExecutionOutcome {
+                status: OperationStatus::Failed,
+                target_path: target.to_string_lossy().into_owned(),
+                error_message: Some(error),
+                reversible: false,
+            }
+        }
+    };
+    let result = run_file_operation(&planned.action_type, source, target);
+    match result {
+        Ok(()) => {
+            let cleanup_warning = fs::remove_file(&backup).err().map(|error| {
+                format!(
+                    "覆盖已完成，但未能清理临时备份 {}: {}",
+                    backup.display(),
+                    error
+                )
+            });
+            ExecutionOutcome {
+                status: OperationStatus::Success,
+                target_path: target.to_string_lossy().into_owned(),
+                error_message: cleanup_warning,
+                reversible: false,
+            }
+        }
+        Err(error) => {
+            let rollback = restore_overwritten_target(target, &backup);
+            let message = match rollback {
+                Ok(()) => format!("{}；原目标文件已恢复", error),
+                Err(rollback_error) => format!("{}；恢复原目标文件失败: {}", error, rollback_error),
+            };
+            ExecutionOutcome {
+                status: OperationStatus::Failed,
+                target_path: target.to_string_lossy().into_owned(),
+                error_message: Some(message),
+                reversible: false,
+            }
+        }
+    }
+}
+
+fn run_file_operation(action_type: &str, source: &Path, target: &Path) -> Result<(), String> {
+    match action_type {
+        "rename" => executor::safe_rename(source, target),
+        "move" => executor::safe_move(source, target),
+        "copy" => executor::safe_copy(source, target),
+        _ => Err("未知操作类型".into()),
+    }
+}
+
+fn validate_source_snapshot(snapshot: &FileSnapshot) -> Result<(), String> {
+    if snapshot.sha256.is_empty() {
+        return Err("预览未能生成源文件哈希".into());
+    }
+    let path = Path::new(&snapshot.path);
+    let actual_size = fs::metadata(path)
+        .map_err(|error| format!("读取源文件信息失败: {}", error))?
+        .len();
+    if actual_size != snapshot.size_bytes {
+        return Err(format!(
+            "文件大小已变更（预览时 {} 字节，当前 {} 字节）",
+            snapshot.size_bytes, actual_size
+        ));
+    }
+    let actual_hash = hasher::compute_sha256(path)
+        .map_err(|error| format!("计算源文件 SHA-256 失败: {}", error))?;
+    if actual_hash != snapshot.sha256 {
+        return Err("文件内容已变更".into());
+    }
+    Ok(())
+}
+
+fn requires_delete_confirmation(operations: &[PlannedOperation]) -> bool {
+    operations
+        .iter()
+        .any(|operation| operation.action_type == "delete" && operation.requires_confirmation)
+}
+
+fn validate_overwrite_target(planned: &PlannedOperation, target: &Path) -> Result<(), String> {
+    if !planned.expected_target_exists {
+        return Err("目标文件在预览后新增，已跳过覆盖以保护该文件".into());
+    }
+    let expected_hash = planned
+        .expected_target_hash
+        .as_deref()
+        .ok_or_else(|| "预览时未能校验目标文件，已跳过覆盖".to_string())?;
+    let actual_hash = hasher::compute_sha256(target)
+        .map_err(|error| format!("计算目标文件 SHA-256 失败: {}", error))?;
+    if actual_hash != expected_hash {
+        return Err("目标文件在预览后已变更，已跳过覆盖以保护该文件".into());
+    }
+    Ok(())
+}
+
+fn move_target_to_backup(target: &Path) -> Result<PathBuf, String> {
+    if !target.is_file() {
+        return Err(format!("冲突目标不是普通文件: {}", target.display()));
+    }
+    let parent = target.parent().unwrap_or(Path::new("."));
+    let name = target
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_default();
+    let backup = parent.join(format!(".{}.smartsorter-backup-{}", name, Uuid::new_v4()));
+    fs::rename(target, &backup).map_err(|error| format!("创建冲突目标备份失败: {}", error))?;
+    Ok(backup)
+}
+
+fn restore_overwritten_target(target: &Path, backup: &Path) -> Result<(), String> {
+    if target.exists() {
+        fs::remove_file(target).map_err(|error| format!("清理未完成的新目标失败: {}", error))?;
+    }
+    fs::rename(backup, target).map_err(|error| format!("恢复备份失败: {}", error))
 }
 
 fn next_available_target(initial: &Path) -> PathBuf {
@@ -317,12 +490,18 @@ mod tests {
             source_path: source.to_string_lossy().into_owned(),
             target_path: renamed.to_string_lossy().into_owned(),
             conflict_strategy: Some(ConflictStrategy::Skip),
+            expected_target_exists: false,
+            expected_target_hash: None,
+            requires_confirmation: false,
         };
         let move_file = PlannedOperation {
             action_type: "move".into(),
             source_path: renamed.to_string_lossy().into_owned(),
             target_path: moved.to_string_lossy().into_owned(),
             conflict_strategy: Some(ConflictStrategy::Skip),
+            expected_target_exists: false,
+            expected_target_hash: None,
+            requires_confirmation: false,
         };
 
         assert!(matches!(
@@ -354,6 +533,9 @@ mod tests {
             source_path: source.to_string_lossy().into_owned(),
             target_path: target.to_string_lossy().into_owned(),
             conflict_strategy: Some(ConflictStrategy::Skip),
+            expected_target_exists: true,
+            expected_target_hash: None,
+            requires_confirmation: false,
         };
         let outcome = execute_planned_operation(&planned);
 
@@ -362,5 +544,50 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "existing");
 
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_overwrite_restores_the_original_target() {
+        let root = std::env::temp_dir().join(format!("smart-sorter-overwrite-{}", Uuid::new_v4()));
+        let missing_source = root.join("missing.txt");
+        let target = root.join("target.txt");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&target, "original target").unwrap();
+        let target_hash = hasher::compute_sha256(&target).unwrap();
+
+        let planned = PlannedOperation {
+            action_type: "move".into(),
+            source_path: missing_source.to_string_lossy().into_owned(),
+            target_path: target.to_string_lossy().into_owned(),
+            conflict_strategy: Some(ConflictStrategy::Overwrite),
+            expected_target_exists: true,
+            expected_target_hash: Some(target_hash),
+            requires_confirmation: false,
+        };
+        let outcome = execute_planned_operation(&planned);
+
+        assert!(matches!(outcome.status, OperationStatus::Failed));
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "original target");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn detects_delete_operations_that_require_confirmation() {
+        let delete = PlannedOperation {
+            action_type: "delete".into(),
+            source_path: "source.txt".into(),
+            target_path: String::new(),
+            conflict_strategy: None,
+            expected_target_exists: false,
+            expected_target_hash: None,
+            requires_confirmation: true,
+        };
+        let unchecked_delete = PlannedOperation {
+            requires_confirmation: false,
+            ..delete.clone()
+        };
+
+        assert!(requires_delete_confirmation(&[delete]));
+        assert!(!requires_delete_confirmation(&[unchecked_delete]));
     }
 }

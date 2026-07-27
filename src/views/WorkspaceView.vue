@@ -202,10 +202,32 @@ function dismissToast() {
 
 async function runExecute() {
   if (!previewStore.result) return;
+  const confirmedDeleteIds = previewStore.result.items
+    .filter(
+      (item) =>
+        item.checked &&
+        item.operations.some(
+          (operation) =>
+            operation.action_type === "delete" &&
+            operation.requires_confirmation,
+        ),
+    )
+    .map((item) => item.id);
+  if (
+    confirmedDeleteIds.length > 0 &&
+    !confirm(
+      `确定永久删除 ${confirmedDeleteIds.length} 个文件吗？此操作不可撤销。`,
+    )
+  ) {
+    return;
+  }
   toast.value.visible = false;
   await startProgress();
   try {
-    await previewStore.execute(previewStore.result.task_id);
+    await previewStore.execute(
+      previewStore.result.task_id,
+      confirmedDeleteIds,
+    );
   } finally {
     stopProgress();
   }

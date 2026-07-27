@@ -6,7 +6,7 @@ use chrono::{DateTime, Local};
 use tauri::{command, AppHandle, Emitter, Manager};
 use uuid::Uuid;
 
-use crate::engine::{executor, metadata, scanner};
+use crate::engine::{executor, hasher, metadata, scanner};
 use crate::models::log::{ExecutionLog, ExecutionSummary, Operation, OperationStatus, UndoStatus};
 use crate::models::media_classify::{
     AliasLearningHint, ClassifyExecuteRequest, ClassifyPreviewItem, ClassifyPreviewResult,
@@ -619,6 +619,11 @@ pub async fn execute_media_classify(app: AppHandle, task_id: String) -> Result<S
             }
         };
 
+        let target_hash = if result.is_ok() {
+            hasher::compute_sha256(target).ok()
+        } else {
+            None
+        };
         operations.push(Operation {
             op_id: Uuid::new_v4().to_string(),
             action: "move".to_string(),
@@ -626,7 +631,8 @@ pub async fn execute_media_classify(app: AppHandle, task_id: String) -> Result<S
             target_path: item.target_path.clone(),
             status,
             error_message,
-            reversible: true,
+            reversible: target_hash.is_some(),
+            target_hash,
         });
     }
 

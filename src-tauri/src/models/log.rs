@@ -29,6 +29,9 @@ pub struct Operation {
     pub status: OperationStatus,
     pub error_message: Option<String>,
     pub reversible: bool,
+    /// 成功执行后写入目标文件的哈希，撤销前必须匹配，避免误处理后来替换的文件。
+    #[serde(default)]
+    pub target_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

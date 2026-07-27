@@ -20,7 +20,7 @@ export const usePreviewStore = defineStore("preview", () => {
 
   const executeResult = ref<{ success: boolean; message: string } | null>(null);
 
-  async function execute(taskId: string) {
+  async function execute(taskId: string, confirmedDeleteIds: string[]) {
     if (!result.value) return;
     executing.value = true;
     executeResult.value = null;
@@ -28,7 +28,11 @@ export const usePreviewStore = defineStore("preview", () => {
       const checkedIds = result.value.items
         .filter((item) => item.checked)
         .map((item) => item.id);
-      const msg = await executeTask(taskId, checkedIds);
+      const msg = await executeTask({
+        taskId,
+        checkedIds,
+        confirmedDeleteIds,
+      });
       executeResult.value = { success: true, message: msg || "执行完成" };
       result.value = null; // 执行成功后清除预览，防止重复执行旧任务
     } catch (e: any) {

@@ -49,6 +49,8 @@ pub struct FileSnapshot {
     pub size_bytes: u64,
     pub created_at: String,
     pub modified_at: String,
+    #[serde(default)]
+    pub sha256: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,6 +74,20 @@ pub struct PlannedOperation {
     pub source_path: String,
     pub target_path: String,
     pub conflict_strategy: Option<ConflictStrategy>,
+    #[serde(default)]
+    pub expected_target_exists: bool,
+    #[serde(default)]
+    pub expected_target_hash: Option<String>,
+    #[serde(default)]
+    pub requires_confirmation: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecuteTaskRequest {
+    pub task_id: String,
+    pub checked_ids: Vec<String>,
+    pub confirmed_delete_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

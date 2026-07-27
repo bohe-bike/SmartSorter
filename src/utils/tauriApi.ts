@@ -3,6 +3,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   PreviewRequest,
   PreviewResult,
+  ExecuteTaskRequest,
   RuleSet,
   DuplicateResult,
   DuplicateDeleteRequest,
@@ -39,10 +40,9 @@ export async function analyzePreview(
 // ========== 物理执行 ==========
 
 export async function executeTask(
-  taskId: string,
-  checkedIds: string[],
+  request: ExecuteTaskRequest,
 ): Promise<string> {
-  return invoke<string>("execute_task", { taskId, checkedIds });
+  return invoke<string>("execute_task", { request });
 }
 
 // ========== 撤销 ==========

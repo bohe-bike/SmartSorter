@@ -246,6 +246,7 @@ pub async fn delete_duplicates(
             status,
             error_message,
             reversible: false,
+            target_hash: None,
         });
     }
 

@@ -145,6 +145,7 @@ export interface FileSnapshot {
   size_bytes: number;
   created_at: string;
   modified_at: string;
+  sha256: string;
 }
 
 export interface FileTarget {
@@ -164,6 +165,15 @@ export interface PlannedOperation {
   source_path: string;
   target_path: string;
   conflict_strategy: ConflictStrategy | null;
+  expected_target_exists: boolean;
+  expected_target_hash: string | null;
+  requires_confirmation: boolean;
+}
+
+export interface ExecuteTaskRequest {
+  taskId: string;
+  checkedIds: string[];
+  confirmedDeleteIds: string[];
 }
 
 export interface Conflict {
@@ -304,6 +314,7 @@ export interface Operation {
   status: "success" | "failed" | "skipped";
   error_message: string | null;
   reversible: boolean;
+  target_hash: string | null;
 }
 
 // ========== 进度事件 ==========
