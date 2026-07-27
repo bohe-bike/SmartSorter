@@ -198,7 +198,11 @@ async function runDelete() {
   });
 
   try {
-    const msg = await deleteDuplicates(pathsToDelete.value);
+    if (!result.value) return;
+    const msg = await deleteDuplicates({
+      taskId: result.value.task_id,
+      pathsToDelete: pathsToDelete.value,
+    });
     showToast(true, msg);
     // 清除结果，提示用户重新扫描
     result.value = null;
@@ -282,6 +286,10 @@ async function runDelete() {
             }}
           </button>
         </div>
+      </div>
+
+      <div v-if="result.errors.length > 0" class="scan-warning">
+        有 {{ result.errors.length }} 个文件或目录未能完成扫描，结果可能不完整。
       </div>
 
       <div v-if="result.groups.length === 0" class="empty">
@@ -522,6 +530,15 @@ async function runDelete() {
   padding: 48px;
   color: var(--color-success);
   font-size: 16px;
+}
+
+.scan-warning {
+  padding: 10px 12px;
+  border: 1px solid rgba(214, 158, 46, 0.45);
+  border-radius: 6px;
+  background: rgba(214, 158, 46, 0.08);
+  color: var(--color-text-secondary);
+  font-size: 13px;
 }
 
 .group-list {

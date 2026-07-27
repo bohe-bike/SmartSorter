@@ -7,6 +7,21 @@ pub struct DuplicateResult {
     pub total_groups: u64,
     pub total_wasted_bytes: u64,
     pub groups: Vec<DuplicateGroup>,
+    pub errors: Vec<DuplicateScanError>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DuplicateScanError {
+    pub path: String,
+    pub error: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DuplicateDeleteRequest {
+    pub task_id: String,
+    pub paths_to_delete: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -5,6 +5,7 @@ import type {
   PreviewResult,
   RuleSet,
   DuplicateResult,
+  DuplicateDeleteRequest,
   MediaClassifyResult,
   ClassificationDimension,
   ClassifyExecuteRequest,
@@ -60,9 +61,9 @@ export async function scanDuplicates(
 }
 
 export async function deleteDuplicates(
-  pathsToDelete: string[],
+  request: DuplicateDeleteRequest,
 ): Promise<string> {
-  return invoke<string>("delete_duplicates", { pathsToDelete });
+  return invoke<string>("delete_duplicates", { request });
 }
 
 // ========== 媒体归类 ==========

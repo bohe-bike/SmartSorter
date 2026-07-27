@@ -187,6 +187,18 @@ export interface DuplicateResult {
   total_groups: number;
   total_wasted_bytes: number;
   groups: DuplicateGroup[];
+  errors: DuplicateScanError[];
+}
+
+export interface DuplicateScanError {
+  path: string;
+  error: string;
+  message: string;
+}
+
+export interface DuplicateDeleteRequest {
+  taskId: string;
+  pathsToDelete: string[];
 }
 
 export interface DuplicateGroup {
