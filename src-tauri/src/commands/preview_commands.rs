@@ -1,12 +1,14 @@
 use crate::engine::{matcher, scanner, transformer};
 use crate::models::preview::{
-    ChangeDetail, FileSnapshot, FileTarget, PreviewError, PreviewItem, PreviewRequest,
-    PreviewResult, PreviewSummary,
+    ChangeDetail, Conflict, FileSnapshot, FileTarget, PlannedOperation, PreviewError, PreviewItem,
+    PreviewRequest, PreviewResult, PreviewSummary,
 };
 use crate::models::progress::ProgressPayload;
-use crate::models::rule::Action;
+use crate::models::rule::{Action, ConflictStrategy};
 use crate::storage::rule_store;
 use chrono::Local;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use tauri::{command, AppHandle, Emitter, Manager};
 use uuid::Uuid;
 
@@ -82,6 +84,7 @@ pub async fn analyze_preview(
     let (items, match_errors) = tauri::async_runtime::spawn_blocking(move || {
         let mut items: Vec<PreviewItem> = Vec::new();
         let errs: Vec<PreviewError> = Vec::new();
+        let mut reserved_targets: HashSet<String> = HashSet::new();
         for (idx, (_source, file_path)) in all_scanned_files.iter().enumerate() {
             if idx % 50 == 0 {
                 let _ = app_clone.emit(
@@ -126,36 +129,73 @@ pub async fn analyze_preview(
 
                 let mut ctx = transformer::TransformContext::default();
                 let mut changes = Vec::new();
+                let mut operations = Vec::new();
                 let mut target_path = file_path.clone();
+                let mut conflict = None;
 
                 for action in &rule.actions {
-                    if let Some(new_path) = transformer::compute_target(file_path, action, &mut ctx)
-                    {
-                        let action_type = match action {
-                            Action::Rename(_) => "rename",
-                            Action::Move(_) => "move",
-                            Action::Copy(_) => "copy",
-                            Action::Delete(_) => "delete",
-                        };
-                        changes.push(ChangeDetail {
-                            rule_id: rule.id.clone(),
-                            rule_name: rule.name.clone(),
-                            action_type: action_type.into(),
-                            description: format!(
-                                "{} → {}",
-                                file_path.display(),
-                                new_path.display()
-                            ),
-                        });
-                        target_path = new_path;
-                    } else if matches!(action, Action::Delete(_)) {
+                    let action_type = match action {
+                        Action::Rename(_) => "rename",
+                        Action::Move(_) => "move",
+                        Action::Copy(_) => "copy",
+                        Action::Delete(_) => "delete",
+                    };
+
+                    if matches!(action, Action::Delete(_)) {
                         changes.push(ChangeDetail {
                             rule_id: rule.id.clone(),
                             rule_name: rule.name.clone(),
                             action_type: "delete".into(),
-                            description: format!("删除 {}", file_path.display()),
+                            description: format!("删除 {}", target_path.display()),
                         });
+                        operations.push(PlannedOperation {
+                            action_type: "delete".into(),
+                            source_path: target_path.to_string_lossy().into_owned(),
+                            target_path: String::new(),
+                            conflict_strategy: None,
+                        });
+                        break; // 删除后没有可继续操作的文件状态。
                     }
+
+                    let Some(base_target) =
+                        transformer::compute_target(&target_path, action, &mut ctx)
+                    else {
+                        continue;
+                    };
+                    if paths_equal(&base_target, &target_path) {
+                        continue;
+                    }
+
+                    let strategy = match action {
+                        Action::Move(params) | Action::Copy(params) => {
+                            params.conflict_strategy.clone()
+                        }
+                        Action::Rename(_) => ConflictStrategy::Skip,
+                        Action::Delete(_) => unreachable!(),
+                    };
+                    let (resolved_target, action_conflict) =
+                        resolve_target(base_target, &strategy, &mut reserved_targets);
+                    if conflict.is_none() {
+                        conflict = action_conflict;
+                    }
+
+                    changes.push(ChangeDetail {
+                        rule_id: rule.id.clone(),
+                        rule_name: rule.name.clone(),
+                        action_type: action_type.into(),
+                        description: format!(
+                            "{} → {}",
+                            target_path.display(),
+                            resolved_target.display()
+                        ),
+                    });
+                    operations.push(PlannedOperation {
+                        action_type: action_type.into(),
+                        source_path: target_path.to_string_lossy().into_owned(),
+                        target_path: resolved_target.to_string_lossy().into_owned(),
+                        conflict_strategy: Some(strategy),
+                    });
+                    target_path = resolved_target;
                 }
 
                 if !changes.is_empty() {
@@ -171,7 +211,8 @@ pub async fn analyze_preview(
                                 .unwrap_or_default(),
                         },
                         changes,
-                        conflict: None,
+                        conflict,
+                        operations,
                     });
                 }
                 break; // 每个文件只匹配第一条规则
@@ -201,6 +242,7 @@ pub async fn analyze_preview(
             }
         }
     }
+    let conflicts = items.iter().filter(|item| item.conflict.is_some()).count() as u64;
 
     let result = PreviewResult {
         task_id,
@@ -213,7 +255,7 @@ pub async fn analyze_preview(
             to_move,
             to_copy,
             to_delete,
-            conflicts: 0,
+            conflicts,
             errors: errors.len() as u64,
         },
         items,
@@ -226,4 +268,129 @@ pub async fn analyze_preview(
     }
 
     Ok(result)
+}
+
+fn resolve_target(
+    initial: PathBuf,
+    strategy: &ConflictStrategy,
+    reserved: &mut HashSet<String>,
+) -> (PathBuf, Option<Conflict>) {
+    let initial_key = path_key(&initial);
+    let occupied_on_disk = initial.exists();
+    let occupied_in_batch = reserved.contains(&initial_key);
+    if !occupied_on_disk && !occupied_in_batch {
+        reserved.insert(initial_key);
+        return (initial, None);
+    }
+
+    let existing_file = occupied_on_disk.then(|| file_snapshot(&initial));
+    let conflict_type = if occupied_on_disk {
+        "name_collision"
+    } else {
+        "batch_name_collision"
+    };
+    let resolved = if *strategy == ConflictStrategy::AutoRename {
+        next_available_target(&initial, reserved)
+    } else {
+        initial
+    };
+    reserved.insert(path_key(&resolved));
+
+    (
+        resolved.clone(),
+        Some(Conflict {
+            conflict_type: conflict_type.into(),
+            existing_file,
+            resolution: strategy.clone(),
+            resolved_path: resolved.to_string_lossy().into_owned(),
+        }),
+    )
+}
+
+fn next_available_target(initial: &Path, reserved: &HashSet<String>) -> PathBuf {
+    let stem = initial
+        .file_stem()
+        .map(|value| value.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let extension = initial
+        .extension()
+        .map(|value| value.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let parent = initial.parent().unwrap_or(Path::new("."));
+
+    for counter in 2u32..=9999 {
+        let name = if extension.is_empty() {
+            format!("{} ({})", stem, counter)
+        } else {
+            format!("{} ({}).{}", stem, counter, extension)
+        };
+        let candidate = parent.join(name);
+        if !candidate.exists() && !reserved.contains(&path_key(&candidate)) {
+            return candidate;
+        }
+    }
+
+    initial.to_path_buf()
+}
+
+fn file_snapshot(path: &Path) -> FileSnapshot {
+    let metadata = std::fs::metadata(path).ok();
+    FileSnapshot {
+        path: path.to_string_lossy().into_owned(),
+        name: path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        size_bytes: metadata.as_ref().map(|meta| meta.len()).unwrap_or(0),
+        created_at: metadata
+            .as_ref()
+            .and_then(|meta| meta.created().ok())
+            .map(|time| chrono::DateTime::<Local>::from(time).to_rfc3339())
+            .unwrap_or_default(),
+        modified_at: metadata
+            .as_ref()
+            .and_then(|meta| meta.modified().ok())
+            .map(|time| chrono::DateTime::<Local>::from(time).to_rfc3339())
+            .unwrap_or_default(),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn path_key(path: &Path) -> String {
+    path.to_string_lossy().replace('/', "\\").to_lowercase()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn path_key(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
+fn paths_equal(left: &Path, right: &Path) -> bool {
+    path_key(left) == path_key(right)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auto_rename_resolves_a_target_reserved_by_an_earlier_file() {
+        let base =
+            std::env::temp_dir().join(format!("smart-sorter-preview-{}", uuid::Uuid::new_v4()));
+        let target = base.join("report.txt");
+        let mut reserved = HashSet::new();
+
+        let (first, first_conflict) =
+            resolve_target(target.clone(), &ConflictStrategy::AutoRename, &mut reserved);
+        let (second, second_conflict) =
+            resolve_target(target, &ConflictStrategy::AutoRename, &mut reserved);
+
+        assert_eq!(first, base.join("report.txt"));
+        assert!(first_conflict.is_none());
+        assert_eq!(second, base.join("report (2).txt"));
+        assert_eq!(
+            second_conflict.map(|conflict| conflict.conflict_type),
+            Some("batch_name_collision".into())
+        );
+    }
 }

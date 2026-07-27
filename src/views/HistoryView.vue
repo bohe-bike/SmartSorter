@@ -318,6 +318,10 @@ async function handleUndo(logId: string) {
   opacity: 0.6;
 }
 
+.op-row.skipped {
+  opacity: 0.55;
+}
+
 .op-action {
   flex-shrink: 0;
   width: 50px;

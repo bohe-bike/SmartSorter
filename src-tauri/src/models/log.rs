@@ -36,6 +36,7 @@ pub struct Operation {
 pub enum OperationStatus {
     Success,
     Failed,
+    Skipped,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

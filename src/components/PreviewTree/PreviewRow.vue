@@ -49,8 +49,8 @@ function actionIcon(type: string): string {
 
     <div class="change-col">
       <span
-        v-for="c in item.changes"
-        :key="c.rule_id"
+        v-for="(c, index) in item.changes"
+        :key="`${c.rule_id}-${c.action_type}-${index}`"
         class="change-badge"
         :title="c.description"
       >

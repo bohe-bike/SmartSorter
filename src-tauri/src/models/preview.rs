@@ -39,6 +39,7 @@ pub struct PreviewItem {
     pub target: FileTarget,
     pub changes: Vec<ChangeDetail>,
     pub conflict: Option<Conflict>,
+    pub operations: Vec<PlannedOperation>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,6 +63,15 @@ pub struct ChangeDetail {
     pub rule_name: String,
     pub action_type: String,
     pub description: String,
+}
+
+/// 预览阶段冻结的单步文件操作，执行阶段直接按此计划运行。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlannedOperation {
+    pub action_type: String,
+    pub source_path: String,
+    pub target_path: String,
+    pub conflict_strategy: Option<ConflictStrategy>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

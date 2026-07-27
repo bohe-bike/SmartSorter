@@ -136,6 +136,7 @@ export interface PreviewItem {
   target: FileTarget;
   changes: ChangeDetail[];
   conflict: Conflict | null;
+  operations: PlannedOperation[];
 }
 
 export interface FileSnapshot {
@@ -156,6 +157,13 @@ export interface ChangeDetail {
   rule_name: string;
   action_type: string;
   description: string;
+}
+
+export interface PlannedOperation {
+  action_type: "rename" | "move" | "copy" | "delete";
+  source_path: string;
+  target_path: string;
+  conflict_strategy: ConflictStrategy | null;
 }
 
 export interface Conflict {
@@ -275,7 +283,7 @@ export interface Operation {
   action: string;
   source_path: string;
   target_path: string;
-  status: "success" | "failed";
+  status: "success" | "failed" | "skipped";
   error_message: string | null;
   reversible: boolean;
 }
