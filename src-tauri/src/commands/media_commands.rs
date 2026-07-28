@@ -24,6 +24,7 @@ const AUTO_CLASSIFY_MARGIN: u8 = 15;
 
 #[derive(Debug, Clone, Copy)]
 enum ClassificationDimension {
+    All,
     Creator,
     Album,
     Folder,
@@ -32,15 +33,17 @@ enum ClassificationDimension {
 impl ClassificationDimension {
     fn parse(value: &str) -> Result<Self, String> {
         match value.trim().to_lowercase().as_str() {
+            "all" => Ok(Self::All),
             "creator" => Ok(Self::Creator),
             "album" => Ok(Self::Album),
             "folder" => Ok(Self::Folder),
-            _ => Err("归类维度无效，应为 creator、album 或 folder".into()),
+            _ => Err("归类维度无效，应为 all、creator、album 或 folder".into()),
         }
     }
 
     fn as_str(self) -> &'static str {
         match self {
+            Self::All => "all",
             Self::Creator => "creator",
             Self::Album => "album",
             Self::Folder => "folder",
@@ -49,6 +52,10 @@ impl ClassificationDimension {
 
     fn allows_source(self, source: &str) -> bool {
         match self {
+            Self::All => matches!(
+                source,
+                "folder_name" | "artist" | "album_artist" | "album" | "composer"
+            ),
             Self::Creator => matches!(
                 source,
                 "folder_name" | "artist" | "album_artist" | "composer"
@@ -238,8 +245,10 @@ async fn scan_media_with_keywords(
         let mut combined = Vec::new();
         for keyword in saved_keywords {
             if keyword.chars().count() >= 2
-                && !(matches!(dimension, ClassificationDimension::Creator)
-                    && is_creator_keyword_excluded(&keyword, &alias_map, &creator_exclusions))
+                && !(matches!(
+                    dimension,
+                    ClassificationDimension::Creator | ClassificationDimension::All
+                ) && is_creator_keyword_excluded(&keyword, &alias_map, &creator_exclusions))
                 && seen.insert(normalize_match_text(&keyword))
             {
                 combined.push(keyword);
@@ -265,9 +274,11 @@ async fn scan_media_with_keywords(
             )
         {
             if kw.chars().count() >= 2
-                && !(matches!(dimension, ClassificationDimension::Creator)
-                    && is_creator_keyword_excluded(kw, &alias_map, &creator_exclusions))
-                && seen.insert(kw.to_lowercase())
+                && !(matches!(
+                    dimension,
+                    ClassificationDimension::Creator | ClassificationDimension::All
+                ) && is_creator_keyword_excluded(kw, &alias_map, &creator_exclusions))
+                && seen.insert(normalize_match_text(kw))
             {
                 combined.push(kw.clone());
             }
@@ -289,6 +300,7 @@ async fn scan_media_with_keywords(
     } else {
         merge_containing_keywords(&all_keywords)
     };
+    let normalized_folder_keywords = build_normalized_keyword_map(&merged_map);
     // merged_map: 原始关键字 → 合并后关键字（最短的那个）
     let mut final_keywords: Vec<String> = merged_map
         .values()
@@ -361,16 +373,18 @@ async fn scan_media_with_keywords(
         let mut candidates: HashMap<String, CandidateScore> = HashMap::new();
         for kw in &final_keywords {
             if let Some(score) = filename_match_score(&file_stem, kw) {
-                let canonical = canonical_keyword(kw, &alias_map);
-                add_candidate(&mut candidates, &canonical, score, "文件名");
+                let target = match_target_keyword(kw, &alias_map, is_saved_keyword_group);
+                add_candidate(&mut candidates, &target, score, "文件名");
             }
         }
 
         if sources.contains("folder_name") {
             if let Some(folder_name) = direct_child_folder_name(path, &paths) {
-                if let Some(keyword) = merged_map.get(&folder_name) {
-                    let canonical = canonical_keyword(keyword, &alias_map);
-                    add_candidate(&mut candidates, &canonical, 100, "所属子文件夹");
+                if let Some(keyword) =
+                    normalized_folder_keywords.get(&normalize_match_text(&folder_name))
+                {
+                    let target = match_target_keyword(keyword, &alias_map, is_saved_keyword_group);
+                    add_candidate(&mut candidates, &target, 100, "所属子文件夹");
                 }
             }
         }
@@ -388,8 +402,8 @@ async fn scan_media_with_keywords(
                 for kw in &final_keywords {
                     if let Some(score) = metadata_match_score(value, kw, exact_score, partial_score)
                     {
-                        let canonical = canonical_keyword(kw, &alias_map);
-                        add_candidate(&mut candidates, &canonical, score, source);
+                        let target = match_target_keyword(kw, &alias_map, is_saved_keyword_group);
+                        add_candidate(&mut candidates, &target, score, source);
                     }
                 }
             }
@@ -671,8 +685,12 @@ pub fn preview_media_classify(
             .keyword_assignments
             .get(&file.path)
             .ok_or_else(|| format!("未匹配文件 {} 尚未选择归属关键字", file.path))?;
-        if !available_keywords.contains(keyword.as_str()) {
-            return Err(format!("文件 {} 的归属关键字无效", file.path));
+        if file.matched_keywords.is_empty() {
+            if !available_keywords.contains(keyword.as_str()) {
+                return Err(format!("文件 {} 的归属关键字无效", file.path));
+            }
+        } else if !file.matched_keywords.contains(keyword) {
+            return Err(format!("文件 {} 的归属关键字不在匹配候选中", file.path));
         }
 
         let source = Path::new(&file.path);
@@ -1074,6 +1092,35 @@ fn canonical_keyword(keyword: &str, aliases: &HashMap<String, String>) -> String
         .unwrap_or_else(|| keyword.to_string())
 }
 
+fn match_target_keyword(
+    keyword: &str,
+    aliases: &HashMap<String, String>,
+    is_saved_keyword_group: bool,
+) -> String {
+    if is_saved_keyword_group {
+        keyword.to_string()
+    } else {
+        canonical_keyword(keyword, aliases)
+    }
+}
+
+fn build_normalized_keyword_map(merged_map: &HashMap<String, String>) -> HashMap<String, String> {
+    let mut entries: Vec<_> = merged_map.iter().collect();
+    entries.sort_by(|(left, _), (right, _)| {
+        normalize_match_text(left)
+            .cmp(&normalize_match_text(right))
+            .then_with(|| left.cmp(right))
+    });
+    entries
+        .into_iter()
+        .fold(HashMap::new(), |mut result, (source, target)| {
+            result
+                .entry(normalize_match_text(source))
+                .or_insert_with(|| target.clone());
+            result
+        })
+}
+
 fn is_creator_keyword_excluded(
     keyword: &str,
     aliases: &HashMap<String, String>,
@@ -1217,9 +1264,13 @@ mod tests {
 
     #[test]
     fn classification_dimension_filters_incompatible_sources() {
+        let all = ClassificationDimension::parse("all").unwrap();
         let creator = ClassificationDimension::parse("creator").unwrap();
         let album = ClassificationDimension::parse("album").unwrap();
 
+        assert!(all.allows_source("artist"));
+        assert!(all.allows_source("album"));
+        assert!(all.allows_source("folder_name"));
         assert!(creator.allows_source("artist"));
         assert!(!creator.allows_source("album"));
         assert!(album.allows_source("album"));
@@ -1254,6 +1305,37 @@ mod tests {
 
         assert_eq!(canonical_keyword("jay chou", &alias_map), "周杰伦");
         assert_eq!(canonical_keyword("Other", &alias_map), "Other");
+    }
+
+    #[test]
+    fn saved_keyword_group_preserves_its_curated_target_name() {
+        let aliases = vec![KeywordAlias {
+            alias: "Jay Chou".into(),
+            canonical: "周杰伦".into(),
+            confirmations: 3,
+            updated_at: String::new(),
+        }];
+        let alias_map = build_alias_map(&aliases);
+
+        assert_eq!(
+            match_target_keyword("Jay Chou", &alias_map, true),
+            "Jay Chou"
+        );
+        assert_eq!(
+            match_target_keyword("Jay Chou", &alias_map, false),
+            "周杰伦"
+        );
+    }
+
+    #[test]
+    fn folder_keyword_matching_ignores_case_and_whitespace() {
+        let merged = HashMap::from([("频道 X".to_string(), "频道 X".to_string())]);
+        let normalized = build_normalized_keyword_map(&merged);
+
+        assert_eq!(
+            normalized.get(&normalize_match_text(" 频道x ")),
+            Some(&"频道 X".to_string())
+        );
     }
 
     #[test]

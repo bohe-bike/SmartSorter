@@ -283,7 +283,7 @@ export interface MediaFile {
   checked: boolean;
 }
 
-export type ClassificationDimension = "creator" | "album" | "folder";
+export type ClassificationDimension = "all" | "creator" | "album" | "folder";
 
 export interface ClassifyExecuteRequest {
   task_id: string;

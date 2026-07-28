@@ -100,7 +100,7 @@ pub fn save_keyword_group(
         return Err("关键词组名称不能为空".into());
     }
     let dimension = request.classification_dimension.trim().to_lowercase();
-    if !matches!(dimension.as_str(), "creator" | "album" | "folder") {
+    if !matches!(dimension.as_str(), "all" | "creator" | "album" | "folder") {
         return Err("关键词组归类维度无效".into());
     }
     let sources = normalize_sources(&request.keyword_sources, &dimension);
@@ -116,7 +116,7 @@ pub fn save_keyword_group(
         .collect();
     let keywords = normalize_keywords(
         request.keywords,
-        if dimension == "creator" {
+        if matches!(dimension.as_str(), "all" | "creator") {
             Some(&exclusions)
         } else {
             None
@@ -216,6 +216,10 @@ fn normalize_sources(sources: &[String], dimension: &str) -> Vec<String> {
     for source in sources {
         let source = source.trim().to_lowercase();
         let valid = match dimension {
+            "all" => matches!(
+                source.as_str(),
+                "folder_name" | "artist" | "album_artist" | "album" | "composer"
+            ),
             "creator" => matches!(
                 source.as_str(),
                 "folder_name" | "artist" | "album_artist" | "composer"
@@ -272,6 +276,25 @@ mod tests {
             vec!["音乐频道"]
         );
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn all_dimension_accepts_every_keyword_source() {
+        let sources = normalize_sources(
+            &[
+                "folder_name".into(),
+                "artist".into(),
+                "album_artist".into(),
+                "album".into(),
+                "composer".into(),
+            ],
+            "all",
+        );
+
+        assert_eq!(
+            sources,
+            vec!["folder_name", "artist", "album_artist", "album", "composer",]
+        );
     }
 
     #[test]

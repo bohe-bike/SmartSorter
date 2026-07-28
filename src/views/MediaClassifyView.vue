@@ -16,8 +16,8 @@ import {
 } from "../utils/tauriApi";
 import type {
   KeywordGroup,
-  ClassificationDimension,
   ClassifyPreviewResult,
+  MediaFile,
   MediaClassifyResult,
   MediaKeywordGroup,
   ProgressEvent,
@@ -31,21 +31,12 @@ const mediaTypeOptions = ref([
   { key: "video", label: "视频", checked: true },
   { key: "ebook", label: "电子书", checked: true },
 ]);
-const keywordSourceOptions = ref([
-  { key: "folder_name", label: "子文件夹名称", checked: true },
-  { key: "artist", label: "作者/艺术家", checked: true },
-  { key: "album_artist", label: "专辑艺术家", checked: true },
-  { key: "album", label: "专辑名", checked: true },
-  { key: "composer", label: "作曲家", checked: true },
-]);
-const classificationDimension = ref<ClassificationDimension>("creator");
-const classificationDimensionOptions: {
-  key: ClassificationDimension;
-  label: string;
-}[] = [
-  { key: "creator", label: "按创作者/主体" },
-  { key: "album", label: "按专辑/作品集" },
-  { key: "folder", label: "按现有文件夹" },
+const allKeywordSources = [
+  "folder_name",
+  "artist",
+  "album_artist",
+  "album",
+  "composer",
 ];
 const scanning = ref(false);
 const executing = ref(false);
@@ -76,12 +67,6 @@ let unlistenProgress: (() => void) | null = null;
 
 const selectedMediaTypes = computed(() =>
   mediaTypeOptions.value.filter((item) => item.checked).map((item) => item.key),
-);
-
-const selectedKeywordSources = computed(() =>
-  keywordSourceOptions.value
-    .filter((item) => item.checked)
-    .map((item) => item.key),
 );
 
 const checkedPaths = computed(() => {
@@ -153,6 +138,10 @@ const allKeywords = computed(() => {
   return result.value.keywords.map((k) => k.keyword);
 });
 
+function selectableKeywords(file: MediaFile): string[] {
+  return file.matched_keywords.length > 0 ? file.matched_keywords : allKeywords.value;
+}
+
 // 合并信息
 const mergedKeywords = computed(() => {
   if (!result.value) return [];
@@ -209,8 +198,7 @@ async function prepareProgressListener() {
 async function generateKeywords() {
   if (
     sourcePaths.value.length === 0 ||
-    selectedMediaTypes.value.length === 0 ||
-    selectedKeywordSources.value.length === 0
+    selectedMediaTypes.value.length === 0
   ) {
     return;
   }
@@ -229,8 +217,8 @@ async function generateKeywords() {
       sourcePaths.value,
       recursive.value,
       selectedMediaTypes.value,
-      selectedKeywordSources.value,
-      classificationDimension.value,
+      allKeywordSources,
+      "all",
     );
     editableKeywords.value = generated.keywords.map((item) => item.keyword);
     keywordGroupName.value = "";
@@ -273,8 +261,8 @@ async function saveKeywordGroup() {
     const saved = await saveMediaKeywordGroup({
       id: editingKeywordGroupId.value,
       name: keywordGroupName.value,
-      classificationDimension: classificationDimension.value,
-      keywordSources: selectedKeywordSources.value,
+      classificationDimension: "all",
+      keywordSources: allKeywordSources,
       keywords: editableKeywords.value,
     });
     const index = keywordGroups.value.findIndex((group) => group.id === saved.id);
@@ -297,10 +285,6 @@ function editKeywordGroup(group: MediaKeywordGroup) {
   editingKeywordGroupId.value = group.id;
   keywordGroupName.value = group.name;
   editableKeywords.value = [...group.keywords];
-  classificationDimension.value = group.classification_dimension;
-  keywordSourceOptions.value.forEach((item) => {
-    item.checked = group.keyword_sources.includes(item.key);
-  });
   showKeywordEditor.value = true;
   result.value = null;
   preview.value = null;
@@ -589,7 +573,7 @@ function mediaIcon(type: string): string {
       </div>
 
       <div
-        v-if="workflowMode === 'keywords' && classificationDimension === 'creator'"
+        v-if="workflowMode === 'keywords'"
         class="filter-row exclusion-row"
       >
         <span class="filter-label">频道名称排除</span>
@@ -628,27 +612,8 @@ function mediaIcon(type: string): string {
       </div>
 
       <div v-if="workflowMode === 'keywords'" class="filter-row">
-        <span class="filter-label">关键字来源</span>
-        <label
-          v-for="item in keywordSourceOptions"
-          :key="item.key"
-          class="filter-chip"
-        >
-          <input v-model="item.checked" type="checkbox" /> {{ item.label }}
-        </label>
-      </div>
-
-      <div v-if="workflowMode === 'keywords'" class="filter-row">
-        <label class="filter-label" for="classification-dimension">归类维度</label>
-        <select id="classification-dimension" v-model="classificationDimension" class="keyword-select">
-          <option
-            v-for="option in classificationDimensionOptions"
-            :key="option.key"
-            :value="option.key"
-          >
-            {{ option.label }}
-          </option>
-        </select>
+        <span class="filter-label">生成来源</span>
+        <span>子文件夹、作者/艺术家、专辑艺术家、专辑名、作曲家</span>
       </div>
 
       <div v-if="workflowMode === 'classify'" class="filter-row">
@@ -685,8 +650,7 @@ function mediaIcon(type: string): string {
         :disabled="
           sourcePaths.length === 0 ||
           scanning ||
-          selectedMediaTypes.length === 0 ||
-          selectedKeywordSources.length === 0
+          selectedMediaTypes.length === 0
         "
         @click="generateKeywords"
       >
@@ -840,7 +804,7 @@ function mediaIcon(type: string): string {
             "
           >
             <option value="" disabled>请选择关键字</option>
-            <option v-for="kw in allKeywords" :key="kw" :value="kw">
+            <option v-for="kw in selectableKeywords(file)" :key="kw" :value="kw">
               {{ kw }}
             </option>
           </select>
