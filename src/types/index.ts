@@ -238,6 +238,24 @@ export interface MediaClassifyResult {
   groups: KeywordGroup[];
 }
 
+export interface MediaKeywordGroup {
+  id: string;
+  name: string;
+  classification_dimension: ClassificationDimension;
+  keyword_sources: string[];
+  keywords: string[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface KeywordGroupSaveRequest {
+  id?: string;
+  name: string;
+  classificationDimension: ClassificationDimension;
+  keywordSources: string[];
+  keywords: string[];
+}
+
 export interface KeywordInfo {
   keyword: string;
   source: string;

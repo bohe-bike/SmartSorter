@@ -10,6 +10,27 @@ pub struct KeywordAlias {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MediaKeywordGroup {
+    pub id: String,
+    pub name: String,
+    pub classification_dimension: String,
+    pub keyword_sources: Vec<String>,
+    pub keywords: Vec<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeywordGroupSaveRequest {
+    pub id: Option<String>,
+    pub name: String,
+    pub classification_dimension: String,
+    pub keyword_sources: Vec<String>,
+    pub keywords: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AliasLearningHint {
     pub source_path: String,
     pub alias: String,

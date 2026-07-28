@@ -3,18 +3,23 @@ import { computed, onMounted, onUnmounted, ref } from "vue";
 import ProgressBar from "../components/ProgressBar.vue";
 import {
   executeMediaClassify,
+  applyMediaKeywordGroup,
+  deleteMediaKeywordGroup,
   loadCreatorExclusions,
+  loadMediaKeywordGroups,
   listenProgress,
   pickFolder,
   previewMediaClassify,
   scanMediaAuthors,
   saveCreatorExclusions,
+  saveMediaKeywordGroup,
 } from "../utils/tauriApi";
 import type {
   KeywordGroup,
   ClassificationDimension,
   ClassifyPreviewResult,
   MediaClassifyResult,
+  MediaKeywordGroup,
   ProgressEvent,
 } from "../types";
 
@@ -57,6 +62,15 @@ const keywordFilter = ref("");
 const creatorExclusions = ref<string[]>([]);
 const creatorExclusionInput = ref("");
 const savingCreatorExclusions = ref(false);
+const workflowMode = ref<"keywords" | "classify">("keywords");
+const keywordGroups = ref<MediaKeywordGroup[]>([]);
+const selectedKeywordGroupId = ref("");
+const editingKeywordGroupId = ref<string | undefined>(undefined);
+const keywordGroupName = ref("");
+const editableKeywords = ref<string[]>([]);
+const keywordInput = ref("");
+const showKeywordEditor = ref(false);
+const savingKeywordGroup = ref(false);
 
 let unlistenProgress: (() => void) | null = null;
 
@@ -192,7 +206,7 @@ async function prepareProgressListener() {
   });
 }
 
-async function runScan() {
+async function generateKeywords() {
   if (
     sourcePaths.value.length === 0 ||
     selectedMediaTypes.value.length === 0 ||
@@ -211,19 +225,153 @@ async function runScan() {
   await prepareProgressListener();
 
   try {
-    result.value = await scanMediaAuthors(
+    const generated = await scanMediaAuthors(
       sourcePaths.value,
       recursive.value,
       selectedMediaTypes.value,
       selectedKeywordSources.value,
       classificationDimension.value,
     );
+    editableKeywords.value = generated.keywords.map((item) => item.keyword);
+    keywordGroupName.value = "";
+    editingKeywordGroupId.value = undefined;
+    showKeywordEditor.value = true;
+    result.value = null;
   } catch (error) {
     alert("扫描失败: " + error);
   } finally {
     scanning.value = false;
     cleanupProgress();
   }
+}
+
+async function loadKeywordGroups() {
+  try {
+    keywordGroups.value = await loadMediaKeywordGroups();
+  } catch (error) {
+    alert("加载关键词组失败: " + error);
+  }
+}
+
+function addKeyword() {
+  const keyword = keywordInput.value.trim();
+  if (!keyword) return;
+  editableKeywords.value.push(keyword);
+  keywordInput.value = "";
+}
+
+function removeKeyword(index: number) {
+  editableKeywords.value.splice(index, 1);
+}
+
+async function saveKeywordGroup() {
+  if (!keywordGroupName.value.trim() || editableKeywords.value.length === 0) {
+    return;
+  }
+  savingKeywordGroup.value = true;
+  try {
+    const saved = await saveMediaKeywordGroup({
+      id: editingKeywordGroupId.value,
+      name: keywordGroupName.value,
+      classificationDimension: classificationDimension.value,
+      keywordSources: selectedKeywordSources.value,
+      keywords: editableKeywords.value,
+    });
+    const index = keywordGroups.value.findIndex((group) => group.id === saved.id);
+    if (index >= 0) keywordGroups.value.splice(index, 1, saved);
+    else keywordGroups.value.push(saved);
+    keywordGroups.value.sort((left, right) => left.name.localeCompare(right.name));
+    selectedKeywordGroupId.value = saved.id;
+    editingKeywordGroupId.value = saved.id;
+    editableKeywords.value = [...saved.keywords];
+  } catch (error) {
+    alert("保存关键词组失败: " + error);
+  } finally {
+    savingKeywordGroup.value = false;
+  }
+}
+
+function editKeywordGroup(group: MediaKeywordGroup) {
+  workflowMode.value = "keywords";
+  selectedKeywordGroupId.value = group.id;
+  editingKeywordGroupId.value = group.id;
+  keywordGroupName.value = group.name;
+  editableKeywords.value = [...group.keywords];
+  classificationDimension.value = group.classification_dimension;
+  keywordSourceOptions.value.forEach((item) => {
+    item.checked = group.keyword_sources.includes(item.key);
+  });
+  showKeywordEditor.value = true;
+  result.value = null;
+  preview.value = null;
+}
+
+function editSelectedKeywordGroup() {
+  const group = keywordGroups.value.find(
+    (item) => item.id === selectedKeywordGroupId.value,
+  );
+  if (group) editKeywordGroup(group);
+}
+
+async function deleteKeywordGroup() {
+  const group = keywordGroups.value.find(
+    (item) => item.id === selectedKeywordGroupId.value,
+  );
+  if (!group || !confirm(`确定删除关键词组「${group.name}」吗？`)) return;
+  try {
+    await deleteMediaKeywordGroup(group.id);
+    keywordGroups.value = keywordGroups.value.filter((item) => item.id !== group.id);
+    selectedKeywordGroupId.value = "";
+    if (editingKeywordGroupId.value === group.id) {
+      editingKeywordGroupId.value = undefined;
+      keywordGroupName.value = "";
+      editableKeywords.value = [];
+      showKeywordEditor.value = false;
+    }
+    result.value = null;
+    preview.value = null;
+  } catch (error) {
+    alert("删除关键词组失败: " + error);
+  }
+}
+
+async function applyKeywordGroup() {
+  if (
+    !selectedKeywordGroupId.value ||
+    sourcePaths.value.length === 0 ||
+    selectedMediaTypes.value.length === 0
+  ) {
+    return;
+  }
+  scanning.value = true;
+  preview.value = null;
+  executionMessage.value = "";
+  keywordAssignments.value = {};
+  collapsedGroups.value = new Set();
+  keywordFilter.value = "";
+  resetProgress("scanning");
+  await prepareProgressListener();
+  try {
+    result.value = await applyMediaKeywordGroup(
+      sourcePaths.value,
+      recursive.value,
+      selectedMediaTypes.value,
+      selectedKeywordGroupId.value,
+    );
+  } catch (error) {
+    alert("应用关键词组失败: " + error);
+  } finally {
+    scanning.value = false;
+    cleanupProgress();
+  }
+}
+
+function selectWorkflow(mode: "keywords" | "classify") {
+  if (workflowMode.value === mode) return;
+  workflowMode.value = mode;
+  result.value = null;
+  preview.value = null;
+  keywordAssignments.value = {};
 }
 
 async function loadSavedCreatorExclusions() {
@@ -357,6 +505,7 @@ onUnmounted(() => {
 
 onMounted(() => {
   loadSavedCreatorExclusions();
+  loadKeywordGroups();
 });
 
 function formatSize(bytes: number): string {
@@ -411,6 +560,23 @@ function mediaIcon(type: string): string {
         <button class="btn-add" @click="addFolder">+ 选择文件夹</button>
       </div>
 
+      <div class="workflow-switch" role="tablist" aria-label="归类工作模式">
+        <button
+          class="workflow-tab"
+          :class="{ active: workflowMode === 'keywords' }"
+          @click="selectWorkflow('keywords')"
+        >
+          1. 生成关键词
+        </button>
+        <button
+          class="workflow-tab"
+          :class="{ active: workflowMode === 'classify' }"
+          @click="selectWorkflow('classify')"
+        >
+          2. 应用关键词组
+        </button>
+      </div>
+
       <div class="filter-row">
         <span class="filter-label">媒体类型</span>
         <label
@@ -423,7 +589,7 @@ function mediaIcon(type: string): string {
       </div>
 
       <div
-        v-if="classificationDimension === 'creator'"
+        v-if="workflowMode === 'keywords' && classificationDimension === 'creator'"
         class="filter-row exclusion-row"
       >
         <span class="filter-label">频道名称排除</span>
@@ -461,7 +627,7 @@ function mediaIcon(type: string): string {
         </div>
       </div>
 
-      <div class="filter-row">
+      <div v-if="workflowMode === 'keywords'" class="filter-row">
         <span class="filter-label">关键字来源</span>
         <label
           v-for="item in keywordSourceOptions"
@@ -472,7 +638,7 @@ function mediaIcon(type: string): string {
         </label>
       </div>
 
-      <div class="filter-row">
+      <div v-if="workflowMode === 'keywords'" class="filter-row">
         <label class="filter-label" for="classification-dimension">归类维度</label>
         <select id="classification-dimension" v-model="classificationDimension" class="keyword-select">
           <option
@@ -485,7 +651,36 @@ function mediaIcon(type: string): string {
         </select>
       </div>
 
+      <div v-if="workflowMode === 'classify'" class="filter-row">
+        <label class="filter-label" for="keyword-group-select">关键词组</label>
+        <select
+          id="keyword-group-select"
+          v-model="selectedKeywordGroupId"
+          class="keyword-select"
+        >
+          <option value="" disabled>选择已保存的关键词组</option>
+          <option v-for="group in keywordGroups" :key="group.id" :value="group.id">
+            {{ group.name }}（{{ group.keywords.length }}）
+          </option>
+        </select>
+        <button
+          class="btn-sm"
+          :disabled="!selectedKeywordGroupId"
+          @click="editSelectedKeywordGroup"
+        >
+          编辑
+        </button>
+        <button
+          class="btn-sm"
+          :disabled="!selectedKeywordGroupId"
+          @click="deleteKeywordGroup"
+        >
+          删除
+        </button>
+      </div>
+
       <button
+        v-if="workflowMode === 'keywords'"
         class="btn-scan"
         :disabled="
           sourcePaths.length === 0 ||
@@ -493,9 +688,22 @@ function mediaIcon(type: string): string {
           selectedMediaTypes.length === 0 ||
           selectedKeywordSources.length === 0
         "
-        @click="runScan"
+        @click="generateKeywords"
       >
-        {{ scanning ? "扫描中…" : "开始扫描" }}
+        {{ scanning ? "生成中…" : "生成关键词" }}
+      </button>
+      <button
+        v-else
+        class="btn-scan"
+        :disabled="
+          sourcePaths.length === 0 ||
+          scanning ||
+          selectedMediaTypes.length === 0 ||
+          !selectedKeywordGroupId
+        "
+        @click="applyKeywordGroup"
+      >
+        {{ scanning ? "扫描中…" : "应用关键词组并归类" }}
       </button>
 
       <ProgressBar
@@ -505,6 +713,49 @@ function mediaIcon(type: string): string {
         :current-file="progress.currentFile"
         :phase="progress.phase"
       />
+    </section>
+
+    <section
+      v-if="workflowMode === 'keywords' && showKeywordEditor"
+      class="keyword-editor-section"
+    >
+      <div class="section-head">
+        <div>
+          <div class="label">关键词列表</div>
+          <div class="panel-subtitle">可在保存前添加、编辑或删除关键词</div>
+        </div>
+        <button
+          class="btn-preview"
+          :disabled="savingKeywordGroup || !keywordGroupName.trim() || editableKeywords.length === 0"
+          @click="saveKeywordGroup"
+        >
+          {{ savingKeywordGroup ? "保存中…" : "保存关键词组" }}
+        </button>
+      </div>
+      <div class="keyword-group-name-row">
+        <label for="keyword-group-name">名称</label>
+        <input
+          id="keyword-group-name"
+          v-model="keywordGroupName"
+          placeholder="例如：常用作者"
+        />
+      </div>
+      <div class="keyword-add-row">
+        <input
+          v-model="keywordInput"
+          placeholder="添加关键词"
+          @keyup.enter="addKeyword"
+        />
+        <button class="btn-sm" :disabled="!keywordInput.trim()" @click="addKeyword">
+          添加
+        </button>
+      </div>
+      <div class="editable-keyword-list">
+        <div v-for="(_, index) in editableKeywords" :key="index" class="editable-keyword-row">
+          <input v-model="editableKeywords[index]" aria-label="关键词" />
+          <button class="btn-exclusion-remove" title="删除关键词" @click="removeKeyword(index)">×</button>
+        </div>
+      </div>
     </section>
 
     <section v-if="result" class="result-section">
@@ -884,6 +1135,89 @@ function mediaIcon(type: string): string {
 
 .filter-row {
   align-items: center;
+}
+
+.workflow-switch {
+  display: flex;
+  gap: 6px;
+  margin: 12px 0 4px;
+}
+
+.workflow-tab {
+  height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  background: var(--color-bg);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.workflow-tab.active {
+  border-color: var(--color-primary);
+  background: var(--color-active);
+  color: var(--color-primary);
+}
+
+.keyword-editor-section {
+  margin-top: 12px;
+  padding: 14px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface);
+}
+
+.keyword-group-name-row,
+.keyword-add-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.keyword-group-name-row label {
+  flex-shrink: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.keyword-group-name-row input,
+.keyword-add-row input,
+.editable-keyword-row input {
+  min-width: 0;
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-size: 13px;
+}
+
+.keyword-group-name-row input {
+  width: min(320px, 100%);
+}
+
+.keyword-add-row input {
+  width: min(240px, 100%);
+}
+
+.editable-keyword-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.editable-keyword-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.editable-keyword-row input {
+  width: 100%;
 }
 
 .exclusion-row {

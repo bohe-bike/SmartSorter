@@ -8,6 +8,8 @@ import type {
   DuplicateResult,
   DuplicateDeleteRequest,
   MediaClassifyResult,
+  MediaKeywordGroup,
+  KeywordGroupSaveRequest,
   ClassificationDimension,
   ClassifyExecuteRequest,
   ClassifyPreviewResult,
@@ -102,6 +104,34 @@ export async function saveCreatorExclusions(
   keywords: string[],
 ): Promise<string[]> {
   return invoke<string[]>("save_creator_exclusions", { keywords });
+}
+
+export async function loadMediaKeywordGroups(): Promise<MediaKeywordGroup[]> {
+  return invoke<MediaKeywordGroup[]>("load_media_keyword_groups");
+}
+
+export async function saveMediaKeywordGroup(
+  request: KeywordGroupSaveRequest,
+): Promise<MediaKeywordGroup> {
+  return invoke<MediaKeywordGroup>("save_media_keyword_group", { request });
+}
+
+export async function deleteMediaKeywordGroup(id: string): Promise<void> {
+  return invoke("delete_media_keyword_group", { id });
+}
+
+export async function applyMediaKeywordGroup(
+  paths: string[],
+  recursive: boolean,
+  mediaTypes: string[],
+  groupId: string,
+): Promise<MediaClassifyResult> {
+  return invoke<MediaClassifyResult>("apply_media_keyword_group", {
+    paths,
+    recursive,
+    mediaTypes,
+    groupId,
+  });
 }
 
 // ========== 历史日志 ==========

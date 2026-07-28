@@ -10,7 +10,8 @@ use crate::engine::{executor, hasher, metadata, scanner};
 use crate::models::log::{ExecutionLog, ExecutionSummary, Operation, OperationStatus, UndoStatus};
 use crate::models::media_classify::{
     AliasLearningHint, ClassifyExecuteRequest, ClassifyPreviewItem, ClassifyPreviewResult,
-    KeywordAlias, KeywordGroup, KeywordInfo, MediaClassifyResult, MediaFile,
+    KeywordAlias, KeywordGroup, KeywordGroupSaveRequest, KeywordInfo, MediaClassifyResult,
+    MediaFile, MediaKeywordGroup,
 };
 use crate::models::progress::ProgressPayload;
 use crate::storage::{log_store, media_classify_store};
@@ -73,6 +74,27 @@ pub async fn scan_media_authors(
     keyword_sources: Vec<String>,
     classification_dimension: String,
 ) -> Result<MediaClassifyResult, String> {
+    scan_media_with_keywords(
+        app,
+        paths,
+        recursive,
+        media_types,
+        keyword_sources,
+        classification_dimension,
+        None,
+    )
+    .await
+}
+
+async fn scan_media_with_keywords(
+    app: AppHandle,
+    paths: Vec<String>,
+    recursive: bool,
+    media_types: Vec<String>,
+    keyword_sources: Vec<String>,
+    classification_dimension: String,
+    saved_keywords: Option<Vec<String>>,
+) -> Result<MediaClassifyResult, String> {
     let task_id = Uuid::new_v4().to_string();
     let filters = normalize_media_filters(&media_types);
     let dimension = ClassificationDimension::parse(&classification_dimension)?;
@@ -102,7 +124,7 @@ pub async fn scan_media_authors(
 
     // ① 收集当前文件夹下的子文件夹名作为关键字
     let mut folder_keywords: Vec<String> = Vec::new();
-    if sources.contains("folder_name") {
+    if saved_keywords.is_none() && sources.contains("folder_name") {
         for root_path in &paths {
             let root = Path::new(root_path);
             if !root.is_dir() {
@@ -210,7 +232,26 @@ pub async fn scan_media_authors(
 
     // ④ 合并所有关键字。大小写不同的同一关键字只保留首次出现的写法，
     // 并排序以确保多匹配列表和默认分组的顺序稳定。
-    let all_keywords: Vec<String> = {
+    let is_saved_keyword_group = saved_keywords.is_some();
+    let all_keywords: Vec<String> = if let Some(saved_keywords) = saved_keywords {
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut combined = Vec::new();
+        for keyword in saved_keywords {
+            if keyword.chars().count() >= 2
+                && !(matches!(dimension, ClassificationDimension::Creator)
+                    && is_creator_keyword_excluded(&keyword, &alias_map, &creator_exclusions))
+                && seen.insert(normalize_match_text(&keyword))
+            {
+                combined.push(keyword);
+            }
+        }
+        combined.sort_by(|left, right| {
+            left.to_lowercase()
+                .cmp(&right.to_lowercase())
+                .then_with(|| left.cmp(right))
+        });
+        combined
+    } else {
         let mut seen: HashSet<String> = HashSet::new();
         let mut combined: Vec<String> = Vec::new();
         for kw in folder_keywords
@@ -239,8 +280,15 @@ pub async fn scan_media_authors(
         combined
     };
 
-    // ⑤ 关键字包含关系合并：若 A 包含 B 的文本，合并为 B（最短关键字）
-    let merged_map = merge_containing_keywords(&all_keywords);
+    // ⑤ 动态生成的关键字保持原有包含关系合并；已保存的关键词组按用户整理后的列表原样应用。
+    let merged_map = if is_saved_keyword_group {
+        all_keywords
+            .iter()
+            .map(|keyword| (keyword.clone(), keyword.clone()))
+            .collect()
+    } else {
+        merge_containing_keywords(&all_keywords)
+    };
     // merged_map: 原始关键字 → 合并后关键字（最短的那个）
     let mut final_keywords: Vec<String> = merged_map
         .values()
@@ -267,7 +315,9 @@ pub async fn scan_media_authors(
                 .cmp(&b.to_lowercase())
                 .then_with(|| a.cmp(b))
         });
-        let source = if folder_keywords.contains(kw) && metadata_keywords.contains(kw) {
+        let source = if is_saved_keyword_group {
+            "keyword_group"
+        } else if folder_keywords.contains(kw) && metadata_keywords.contains(kw) {
             "folder_name,metadata"
         } else if folder_keywords.contains(kw) {
             "folder_name"
@@ -475,6 +525,74 @@ pub fn save_creator_exclusions(
         .lock()
         .map_err(|error| error.to_string())? = None;
     Ok(saved)
+}
+
+#[command]
+pub fn load_media_keyword_groups(app: AppHandle) -> Result<Vec<MediaKeywordGroup>, String> {
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?;
+    media_classify_store::load_keyword_groups(&data_dir)
+}
+
+#[command]
+pub fn save_media_keyword_group(
+    app: AppHandle,
+    request: KeywordGroupSaveRequest,
+) -> Result<MediaKeywordGroup, String> {
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?;
+    let group = media_classify_store::save_keyword_group(&data_dir, request)?;
+    *MEDIA_SCAN_CACHE.lock().map_err(|error| error.to_string())? = None;
+    *MEDIA_PREVIEW_CACHE
+        .lock()
+        .map_err(|error| error.to_string())? = None;
+    Ok(group)
+}
+
+#[command]
+pub fn delete_media_keyword_group(app: AppHandle, id: String) -> Result<(), String> {
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?;
+    media_classify_store::delete_keyword_group(&data_dir, &id)?;
+    *MEDIA_SCAN_CACHE.lock().map_err(|error| error.to_string())? = None;
+    *MEDIA_PREVIEW_CACHE
+        .lock()
+        .map_err(|error| error.to_string())? = None;
+    Ok(())
+}
+
+#[command]
+pub async fn apply_media_keyword_group(
+    app: AppHandle,
+    paths: Vec<String>,
+    recursive: bool,
+    media_types: Vec<String>,
+    group_id: String,
+) -> Result<MediaClassifyResult, String> {
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?;
+    let group = media_classify_store::load_keyword_groups(&data_dir)?
+        .into_iter()
+        .find(|group| group.id == group_id)
+        .ok_or_else(|| "关键词组不存在，请重新选择".to_string())?;
+    scan_media_with_keywords(
+        app,
+        paths,
+        recursive,
+        media_types,
+        group.keyword_sources,
+        group.classification_dimension,
+        Some(group.keywords),
+    )
+    .await
 }
 
 #[command]
