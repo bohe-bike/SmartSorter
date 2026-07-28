@@ -7,7 +7,10 @@ use commands::{
     duplicate_commands::{delete_duplicates, scan_duplicates},
     execute_commands::{execute_task, undo_task},
     history_commands::load_history,
-    media_commands::{execute_media_classify, preview_media_classify, scan_media_authors},
+    media_commands::{
+        execute_media_classify, load_creator_exclusions, preview_media_classify,
+        save_creator_exclusions, scan_media_authors,
+    },
     preview_commands::analyze_preview,
     rule_commands::{delete_rule_set, load_rule_sets, save_rule_set},
 };
@@ -36,6 +39,8 @@ pub fn run() {
             scan_media_authors,
             preview_media_classify,
             execute_media_classify,
+            load_creator_exclusions,
+            save_creator_exclusions,
             load_history,
             pick_folder,
         ])

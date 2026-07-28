@@ -9,6 +9,8 @@ const KNOWLEDGE_FILE: &str = "media_classify_aliases.json";
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MediaClassifyKnowledge {
     pub aliases: Vec<KeywordAlias>,
+    #[serde(default)]
+    pub creator_exclusions: Vec<String>,
 }
 
 pub fn load(data_dir: &Path) -> Result<MediaClassifyKnowledge, String> {
@@ -55,6 +57,30 @@ pub fn record_confirmations(data_dir: &Path, hints: &[AliasLearningHint]) -> Res
     write(data_dir, &knowledge)
 }
 
+pub fn load_creator_exclusions(data_dir: &Path) -> Result<Vec<String>, String> {
+    Ok(load(data_dir)?.creator_exclusions)
+}
+
+pub fn save_creator_exclusions(
+    data_dir: &Path,
+    keywords: Vec<String>,
+) -> Result<Vec<String>, String> {
+    let mut knowledge = load(data_dir)?;
+    let mut seen = std::collections::HashSet::new();
+    let mut cleaned = Vec::new();
+    for keyword in keywords {
+        let value = keyword.trim();
+        let normalized = normalize_for_match(value);
+        if value.chars().count() >= 2 && seen.insert(normalized) {
+            cleaned.push(value.to_string());
+        }
+    }
+    cleaned.sort_by(|left, right| normalize_for_match(left).cmp(&normalize_for_match(right)));
+    knowledge.creator_exclusions = cleaned.clone();
+    write(data_dir, &knowledge)?;
+    Ok(cleaned)
+}
+
 fn write(data_dir: &Path, knowledge: &MediaClassifyKnowledge) -> Result<(), String> {
     fs::create_dir_all(data_dir).map_err(|error| format!("创建归类知识库目录失败: {}", error))?;
     let content = serde_json::to_string_pretty(knowledge)
@@ -65,6 +91,15 @@ fn write(data_dir: &Path, knowledge: &MediaClassifyKnowledge) -> Result<(), Stri
 
 fn normalize(value: &str) -> String {
     value.trim().to_lowercase()
+}
+
+fn normalize_for_match(value: &str) -> String {
+    value
+        .trim()
+        .to_lowercase()
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect()
 }
 
 #[cfg(test)]
@@ -88,6 +123,25 @@ mod tests {
         assert_eq!(knowledge.aliases.len(), 1);
         assert_eq!(knowledge.aliases[0].confirmations, 2);
         assert_eq!(knowledge.aliases[0].canonical, "周杰伦");
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn persists_creator_exclusions_without_case_or_space_duplicates() {
+        let directory =
+            std::env::temp_dir().join(format!("smart-sorter-exclusions-{}", Uuid::new_v4()));
+
+        let saved = save_creator_exclusions(
+            &directory,
+            vec!["音乐频道".into(), " 音乐 频道 ".into(), "A".into()],
+        )
+        .unwrap();
+
+        assert_eq!(saved, vec!["音乐频道"]);
+        assert_eq!(
+            load_creator_exclusions(&directory).unwrap(),
+            vec!["音乐频道"]
+        );
         std::fs::remove_dir_all(directory).unwrap();
     }
 }

@@ -94,6 +94,16 @@ export async function executeMediaClassify(taskId: string): Promise<string> {
   return invoke<string>("execute_media_classify", { taskId });
 }
 
+export async function loadCreatorExclusions(): Promise<string[]> {
+  return invoke<string[]>("load_creator_exclusions");
+}
+
+export async function saveCreatorExclusions(
+  keywords: string[],
+): Promise<string[]> {
+  return invoke<string[]>("save_creator_exclusions", { keywords });
+}
+
 // ========== 历史日志 ==========
 
 export async function loadHistory(): Promise<ExecutionLog[]> {

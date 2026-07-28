@@ -1,7 +1,7 @@
-use std::path::{Path, PathBuf};
-use std::fs;
+use crate::models::rule::{Action, RenameMode, RenameParams, RouteParams};
 use chrono::{DateTime, Local};
-use crate::models::rule::{Action, RenameParams, RenameMode, RouteParams};
+use std::fs;
+use std::path::{Path, PathBuf};
 
 /// 序列号上下文，用于 {seq} 变量展开
 pub struct TransformContext {
@@ -11,12 +11,19 @@ pub struct TransformContext {
 
 impl Default for TransformContext {
     fn default() -> Self {
-        Self { sequence: 1, seq_padding: 3 }
+        Self {
+            sequence: 1,
+            seq_padding: 3,
+        }
     }
 }
 
 /// 根据动作计算文件的新路径（纯计算，不触碰文件系统）
-pub fn compute_target(source: &Path, action: &Action, ctx: &mut TransformContext) -> Option<PathBuf> {
+pub fn compute_target(
+    source: &Path,
+    action: &Action,
+    ctx: &mut TransformContext,
+) -> Option<PathBuf> {
     match action {
         Action::Rename(params) => compute_rename(source, params, ctx),
         Action::Move(params) => compute_route(source, params, ctx),
@@ -25,31 +32,58 @@ pub fn compute_target(source: &Path, action: &Action, ctx: &mut TransformContext
     }
 }
 
-fn compute_rename(source: &Path, params: &RenameParams, ctx: &mut TransformContext) -> Option<PathBuf> {
+fn compute_rename(
+    source: &Path,
+    params: &RenameParams,
+    ctx: &mut TransformContext,
+) -> Option<PathBuf> {
     let parent = source.parent()?;
     let stem = source.file_stem()?.to_string_lossy().into_owned();
     let ext = source.extension().map(|e| e.to_string_lossy().into_owned());
 
     let new_stem = match params.mode {
         RenameMode::Replace => {
-            let find = params.detail.get("find").and_then(|v| v.as_str()).unwrap_or("");
-            let replace_with = params.detail.get("replace").and_then(|v| v.as_str()).unwrap_or("");
+            let find = params
+                .detail
+                .get("find")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let replace_with = params
+                .detail
+                .get("replace")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             stem.replace(find, replace_with)
         }
         RenameMode::Prefix => {
-            let prefix = params.detail.get("text").and_then(|v| v.as_str()).unwrap_or("");
+            let prefix = params
+                .detail
+                .get("text")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let expanded = expand_template(prefix, source, ctx);
             format!("{}{}", expanded, stem)
         }
         RenameMode::Suffix => {
-            let suffix = params.detail.get("text").and_then(|v| v.as_str()).unwrap_or("");
+            let suffix = params
+                .detail
+                .get("text")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let expanded = expand_template(suffix, source, ctx);
             format!("{}{}", stem, expanded)
         }
         RenameMode::Sequence => {
-            let template = params.detail.get("template").and_then(|v| v.as_str())
+            let template = params
+                .detail
+                .get("template")
+                .and_then(|v| v.as_str())
                 .unwrap_or("{filename}_{seq}");
-            let padding = params.detail.get("padding").and_then(|v| v.as_u64()).unwrap_or(3) as u32;
+            let padding = params
+                .detail
+                .get("padding")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(3) as u32;
             ctx.seq_padding = padding;
             let result = expand_template(template, source, ctx);
             ctx.sequence += 1;
@@ -64,7 +98,11 @@ fn compute_rename(source: &Path, params: &RenameParams, ctx: &mut TransformConte
     Some(parent.join(new_name))
 }
 
-fn compute_route(source: &Path, params: &RouteParams, ctx: &mut TransformContext) -> Option<PathBuf> {
+fn compute_route(
+    source: &Path,
+    params: &RouteParams,
+    ctx: &mut TransformContext,
+) -> Option<PathBuf> {
     let dest_dir = expand_template(&params.dest_pattern, source, ctx);
     let dest_dir = sanitize_path(&dest_dir);
     let file_name = source.file_name()?;
@@ -81,7 +119,8 @@ fn sanitize_path(path_str: &str) -> String {
         ("", trimmed)
     };
     // 对每一段路径去除前后空白和尾部点号（Windows 不允许）
-    let cleaned: Vec<&str> = rest.split(['\\', '/'])
+    let cleaned: Vec<&str> = rest
+        .split(['\\', '/'])
         .map(|seg| seg.trim().trim_end_matches('.'))
         .filter(|seg| !seg.is_empty())
         .collect();
@@ -97,11 +136,23 @@ pub fn expand_template(template: &str, source: &Path, ctx: &TransformContext) ->
     let mut result = template.to_string();
     let metadata = fs::metadata(source).ok();
 
-    let stem = source.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-    let ext = source.extension().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-    let full_name = source.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-    let parent = source.parent().and_then(|p| p.file_name())
-        .map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let stem = source
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let ext = source
+        .extension()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let full_name = source
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let parent = source
+        .parent()
+        .and_then(|p| p.file_name())
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
 
     result = result.replace("{filename}", &stem);
     result = result.replace("{extension}", &ext);
@@ -127,7 +178,11 @@ pub fn expand_template(template: &str, source: &Path, ctx: &TransformContext) ->
         result = result.replace("{modified_day}", &dt.format("%d").to_string());
     }
 
-    let seq = format!("{:0>width$}", ctx.sequence, width = ctx.seq_padding as usize);
+    let seq = format!(
+        "{:0>width$}",
+        ctx.sequence,
+        width = ctx.seq_padding as usize
+    );
     result = result.replace("{seq}", &seq);
 
     result.trim().to_string()

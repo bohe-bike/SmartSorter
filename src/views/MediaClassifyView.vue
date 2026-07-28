@@ -1,12 +1,14 @@
 <script setup lang="ts">
-import { computed, onUnmounted, ref } from "vue";
+import { computed, onMounted, onUnmounted, ref } from "vue";
 import ProgressBar from "../components/ProgressBar.vue";
 import {
   executeMediaClassify,
+  loadCreatorExclusions,
   listenProgress,
   pickFolder,
   previewMediaClassify,
   scanMediaAuthors,
+  saveCreatorExclusions,
 } from "../utils/tauriApi";
 import type {
   KeywordGroup,
@@ -52,6 +54,9 @@ const keywordAssignments = ref<Record<string, string>>({});
 const collapsedGroups = ref(new Set<string>());
 // 关键字分组搜索过滤词
 const keywordFilter = ref("");
+const creatorExclusions = ref<string[]>([]);
+const creatorExclusionInput = ref("");
+const savingCreatorExclusions = ref(false);
 
 let unlistenProgress: (() => void) | null = null;
 
@@ -221,6 +226,41 @@ async function runScan() {
   }
 }
 
+async function loadSavedCreatorExclusions() {
+  try {
+    creatorExclusions.value = await loadCreatorExclusions();
+  } catch (error) {
+    alert("加载频道名称排除词失败: " + error);
+  }
+}
+
+async function saveCreatorExclusionList(keywords: string[]) {
+  savingCreatorExclusions.value = true;
+  try {
+    creatorExclusions.value = await saveCreatorExclusions(keywords);
+    preview.value = null;
+    result.value = null;
+    keywordAssignments.value = {};
+  } catch (error) {
+    alert("保存频道名称排除词失败: " + error);
+  } finally {
+    savingCreatorExclusions.value = false;
+  }
+}
+
+async function addCreatorExclusion() {
+  const keyword = creatorExclusionInput.value.trim();
+  if (!keyword) return;
+  creatorExclusionInput.value = "";
+  await saveCreatorExclusionList([...creatorExclusions.value, keyword]);
+}
+
+async function removeCreatorExclusion(keyword: string) {
+  await saveCreatorExclusionList(
+    creatorExclusions.value.filter((item) => item !== keyword),
+  );
+}
+
 function toggleGroup(group: KeywordGroup, checked: boolean) {
   group.files.forEach((file) => {
     file.checked = checked;
@@ -315,6 +355,10 @@ onUnmounted(() => {
   cleanupProgress();
 });
 
+onMounted(() => {
+  loadSavedCreatorExclusions();
+});
+
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1048576) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -376,6 +420,45 @@ function mediaIcon(type: string): string {
         >
           <input v-model="item.checked" type="checkbox" /> {{ item.label }}
         </label>
+      </div>
+
+      <div
+        v-if="classificationDimension === 'creator'"
+        class="filter-row exclusion-row"
+      >
+        <span class="filter-label">频道名称排除</span>
+        <div class="exclusion-editor">
+          <input
+            v-model="creatorExclusionInput"
+            class="exclusion-input"
+            :disabled="savingCreatorExclusions"
+            placeholder="输入频道名"
+            @keyup.enter="addCreatorExclusion"
+          />
+          <button
+            class="btn-exclusion-add"
+            :disabled="savingCreatorExclusions || !creatorExclusionInput.trim()"
+            title="添加频道名称排除词"
+            @click="addCreatorExclusion"
+          >
+            添加
+          </button>
+          <span
+            v-for="keyword in creatorExclusions"
+            :key="keyword"
+            class="exclusion-tag"
+          >
+            {{ keyword }}
+            <button
+              class="btn-exclusion-remove"
+              :disabled="savingCreatorExclusions"
+              :title="`移除 ${keyword}`"
+              @click="removeCreatorExclusion(keyword)"
+            >
+              ×
+            </button>
+          </span>
+        </div>
       </div>
 
       <div class="filter-row">
@@ -801,6 +884,73 @@ function mediaIcon(type: string): string {
 
 .filter-row {
   align-items: center;
+}
+
+.exclusion-row {
+  align-items: flex-start;
+}
+
+.exclusion-editor {
+  display: flex;
+  flex: 1;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.exclusion-input {
+  width: 150px;
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-size: 12px;
+}
+
+.btn-exclusion-add,
+.btn-exclusion-remove {
+  border: 1px solid var(--color-border);
+  background: var(--color-bg);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+
+.btn-exclusion-add {
+  height: 30px;
+  padding: 0 10px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.btn-exclusion-add:disabled,
+.btn-exclusion-remove:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.exclusion-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 28px;
+  padding: 0 5px 0 8px;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  background: rgba(214, 158, 46, 0.08);
+  color: var(--color-text);
+  font-size: 12px;
+}
+
+.btn-exclusion-remove {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  font-size: 15px;
+  line-height: 1;
 }
 
 .filter-chip {

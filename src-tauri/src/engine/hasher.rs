@@ -1,6 +1,6 @@
-use std::path::Path;
+use sha2::{Digest, Sha256};
 use std::io::{self, Read};
-use sha2::{Sha256, Digest};
+use std::path::Path;
 
 /// 计算文件的 SHA-256 哈希值
 pub fn compute_sha256(path: &Path) -> io::Result<String> {

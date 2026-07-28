@@ -1,7 +1,7 @@
-pub mod scanner;
-pub mod matcher;
-pub mod transformer;
 pub mod executor;
 pub mod hasher;
-pub mod undo;
+pub mod matcher;
 pub mod metadata;
+pub mod scanner;
+pub mod transformer;
+pub mod undo;

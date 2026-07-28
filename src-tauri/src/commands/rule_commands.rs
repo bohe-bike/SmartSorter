@@ -1,7 +1,7 @@
-use tauri::command;
-use tauri::{AppHandle, Manager};
 use crate::models::rule::RuleSet;
 use crate::storage::rule_store;
+use tauri::command;
+use tauri::{AppHandle, Manager};
 
 #[command]
 pub fn load_rule_sets(app: AppHandle) -> Result<Vec<RuleSet>, String> {

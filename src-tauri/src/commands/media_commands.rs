@@ -82,6 +82,12 @@ pub async fn scan_media_authors(
         .map_err(|error| error.to_string())?;
     let knowledge = media_classify_store::load(&data_dir)?;
     let alias_map = build_alias_map(&knowledge.aliases);
+    let creator_exclusions: HashSet<String> = knowledge
+        .creator_exclusions
+        .iter()
+        .map(|keyword| normalize_match_text(keyword))
+        .filter(|keyword| !keyword.is_empty())
+        .collect();
     let sources: HashSet<String> = keyword_sources
         .iter()
         .map(|source| source.trim().to_lowercase())
@@ -217,7 +223,11 @@ pub async fn scan_media_authors(
                     .flat_map(|alias| [&alias.alias, &alias.canonical]),
             )
         {
-            if kw.chars().count() >= 2 && seen.insert(kw.to_lowercase()) {
+            if kw.chars().count() >= 2
+                && !(matches!(dimension, ClassificationDimension::Creator)
+                    && is_creator_keyword_excluded(kw, &alias_map, &creator_exclusions))
+                && seen.insert(kw.to_lowercase())
+            {
                 combined.push(kw.clone());
             }
         }
@@ -439,6 +449,32 @@ pub async fn scan_media_authors(
     *cache = Some(result.clone());
 
     Ok(result)
+}
+
+#[command]
+pub fn load_creator_exclusions(app: AppHandle) -> Result<Vec<String>, String> {
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?;
+    media_classify_store::load_creator_exclusions(&data_dir)
+}
+
+#[command]
+pub fn save_creator_exclusions(
+    app: AppHandle,
+    keywords: Vec<String>,
+) -> Result<Vec<String>, String> {
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?;
+    let saved = media_classify_store::save_creator_exclusions(&data_dir, keywords)?;
+    *MEDIA_SCAN_CACHE.lock().map_err(|error| error.to_string())? = None;
+    *MEDIA_PREVIEW_CACHE
+        .lock()
+        .map_err(|error| error.to_string())? = None;
+    Ok(saved)
 }
 
 #[command]
@@ -920,6 +956,16 @@ fn canonical_keyword(keyword: &str, aliases: &HashMap<String, String>) -> String
         .unwrap_or_else(|| keyword.to_string())
 }
 
+fn is_creator_keyword_excluded(
+    keyword: &str,
+    aliases: &HashMap<String, String>,
+    exclusions: &HashSet<String>,
+) -> bool {
+    let canonical = canonical_keyword(keyword, aliases);
+    exclusions.contains(&normalize_match_text(keyword))
+        || exclusions.contains(&normalize_match_text(&canonical))
+}
+
 fn append_learning_hints(hints: &mut Vec<AliasLearningHint>, file: &MediaFile, canonical: &str) {
     let canonical_key = normalize_match_text(canonical);
     for alias in &file.matched_keywords {
@@ -1090,5 +1136,33 @@ mod tests {
 
         assert_eq!(canonical_keyword("jay chou", &alias_map), "周杰伦");
         assert_eq!(canonical_keyword("Other", &alias_map), "Other");
+    }
+
+    #[test]
+    fn creator_exclusions_filter_the_keyword_and_its_aliases() {
+        let aliases = vec![KeywordAlias {
+            alias: "Channel X".into(),
+            canonical: "频道X".into(),
+            confirmations: 1,
+            updated_at: String::new(),
+        }];
+        let alias_map = build_alias_map(&aliases);
+        let exclusions = HashSet::from([normalize_match_text("频道X")]);
+
+        assert!(is_creator_keyword_excluded(
+            "Channel X",
+            &alias_map,
+            &exclusions
+        ));
+        assert!(is_creator_keyword_excluded(
+            "频道 X",
+            &alias_map,
+            &exclusions
+        ));
+        assert!(!is_creator_keyword_excluded(
+            "其他作者",
+            &alias_map,
+            &exclusions
+        ));
     }
 }
