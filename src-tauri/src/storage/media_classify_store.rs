@@ -109,6 +109,13 @@ pub fn save_keyword_group(
     }
 
     let mut knowledge = load(data_dir)?;
+    let normalized_name = normalize_for_match(name);
+    let editing_id = request.id.as_deref().filter(|id| !id.trim().is_empty());
+    if knowledge.keyword_groups.iter().any(|group| {
+        Some(group.id.as_str()) != editing_id && normalize_for_match(&group.name) == normalized_name
+    }) {
+        return Err("关键词组名称已存在，请使用其他名称".into());
+    }
     let exclusions: std::collections::HashSet<String> = knowledge
         .creator_exclusions
         .iter()
@@ -317,6 +324,18 @@ mod tests {
 
         assert_eq!(group.keywords, vec!["作者A"]);
         assert_eq!(load_keyword_groups(&directory).unwrap().len(), 1);
+
+        let duplicate = save_keyword_group(
+            &directory,
+            KeywordGroupSaveRequest {
+                id: None,
+                name: " 常用 作者 ".into(),
+                classification_dimension: "creator".into(),
+                keyword_sources: vec!["artist".into()],
+                keywords: vec!["作者B".into()],
+            },
+        );
+        assert_eq!(duplicate.unwrap_err(), "关键词组名称已存在，请使用其他名称");
 
         let updated = save_keyword_group(
             &directory,
