@@ -19,6 +19,11 @@ const router = createRouter({
       component: () => import("./views/MediaClassifyView.vue"),
     },
     {
+      path: "/tag-cleanup",
+      name: "tag-cleanup",
+      component: () => import("./views/TagCleanupView.vue"),
+    },
+    {
       path: "/history",
       name: "history",
       component: () => import("./views/HistoryView.vue"),

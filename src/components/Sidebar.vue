@@ -8,6 +8,7 @@ const navItems = [
   { path: "/", icon: "📂", label: "整理" },
   { path: "/duplicate", icon: "🔍", label: "去重" },
   { path: "/media-classify", icon: "🎵", label: "归类" },
+  { path: "/tag-cleanup", icon: "🏷️", label: "清洗" },
   { path: "/history", icon: "📋", label: "历史" },
   { path: "/settings", icon: "⚙️", label: "设置" },
 ];

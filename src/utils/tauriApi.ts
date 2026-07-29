@@ -13,6 +13,8 @@ import type {
   ClassificationDimension,
   ClassifyExecuteRequest,
   ClassifyPreviewResult,
+  MediaTagCleanupExecuteRequest,
+  MediaTagCleanupResult,
   ExecutionLog,
   ProgressEvent,
 } from "../types";
@@ -132,6 +134,24 @@ export async function applyMediaKeywordGroup(
     mediaTypes,
     groupId,
   });
+}
+
+// ========== 媒体标签清洗 ==========
+
+export async function scanMediaTagCleanup(
+  paths: string[],
+  recursive: boolean,
+): Promise<MediaTagCleanupResult> {
+  return invoke<MediaTagCleanupResult>("scan_media_tag_cleanup", {
+    paths,
+    recursive,
+  });
+}
+
+export async function executeMediaTagCleanup(
+  request: MediaTagCleanupExecuteRequest,
+): Promise<string> {
+  return invoke<string>("execute_media_tag_cleanup", { request });
 }
 
 // ========== 历史日志 ==========

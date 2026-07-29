@@ -304,6 +304,35 @@ export interface ClassifyPreviewResult {
   total: number;
 }
 
+// ========== 媒体标签清洗 ==========
+
+export interface MediaTagCleanupResult {
+  task_id: string;
+  source_paths: string[];
+  scanned_count: number;
+  ready_count: number;
+  files: MediaTagCleanupFile[];
+}
+
+export interface MediaTagCleanupFile {
+  path: string;
+  file_name: string;
+  size_bytes: number;
+  media_type: "audio" | "video" | "unknown";
+  current_artist: string | null;
+  target_artist: string | null;
+  author_source: string;
+  supported: boolean;
+  skip_reason: string | null;
+  checked: boolean;
+}
+
+export interface MediaTagCleanupExecuteRequest {
+  task_id: string;
+  selected_paths: string[];
+  author_assignments: Record<string, string>;
+}
+
 // ========== 日志与撤销 ==========
 
 export interface ExecutionLog {

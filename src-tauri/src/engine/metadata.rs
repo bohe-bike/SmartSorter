@@ -3,11 +3,11 @@ use std::io::{BufReader, Read};
 use std::path::Path;
 
 use exif::{In, Reader as ExifReader, Tag, Value};
-use lofty::config::ParseOptions;
-use lofty::file::TaggedFileExt;
+use lofty::config::{ParseOptions, WriteOptions};
+use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::picture::PictureType;
 use lofty::probe::Probe;
-use lofty::tag::Accessor;
+use lofty::tag::{Accessor, ItemKey, Tag as LoftyTag};
 use lopdf::{Document, Object};
 use quick_xml::events::Event;
 use quick_xml::Reader;
@@ -89,6 +89,57 @@ pub fn extract_all_metadata(path: &Path) -> MediaMetadata {
 
 pub fn media_type_label(path: &Path) -> Option<&'static str> {
     Some(media_type_name(get_media_type(path)?))
+}
+
+/// 仅允许已经由 lofty 稳定支持读写的音视频容器参与标签清洗。
+pub fn supports_tag_cleanup(path: &Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|extension| extension.to_str())
+            .map(|extension| extension.to_ascii_lowercase())
+            .as_deref(),
+        Some("mp3" | "flac" | "m4a" | "ogg" | "wav" | "mp4" | "m4v")
+    )
+}
+
+/// 删除文件中的可写描述标签，保留封面，并写入统一的 Artist / AlbumArtist。
+pub fn clean_tags_and_set_artist(path: &Path, artist: &str) -> Result<(), String> {
+    if !supports_tag_cleanup(path) {
+        return Err("该格式暂不支持安全标签清洗".into());
+    }
+    let artist =
+        normalize_author(artist.to_string()).ok_or_else(|| "作者名称不能为空".to_string())?;
+    let mut tagged = Probe::open(path)
+        .map_err(|error| format!("打开媒体文件失败: {}", error))?
+        .options(ParseOptions::new())
+        .read()
+        .map_err(|error| format!("读取媒体标签失败: {}", error))?;
+    let tag_type = tagged.primary_tag_type();
+    if !tagged.supports_tag_type(tag_type) {
+        return Err("该媒体容器不支持写入主标签".into());
+    }
+
+    // 清洗描述标签时仍保留用于资源管理器缩略图的内嵌封面。
+    let pictures = tagged
+        .tags()
+        .iter()
+        .flat_map(|tag| tag.pictures().iter().cloned())
+        .collect::<Vec<_>>();
+    let mut clean_tag = LoftyTag::new(tag_type);
+    if !clean_tag.insert_text(ItemKey::TrackArtist, artist.clone())
+        || !clean_tag.insert_text(ItemKey::AlbumArtist, artist)
+    {
+        return Err("该媒体格式无法写入 Artist 或 AlbumArtist".into());
+    }
+    for picture in pictures {
+        clean_tag.push_picture(picture);
+    }
+
+    tagged.clear();
+    tagged.insert_tag(clean_tag);
+    tagged
+        .save_to_path(path, WriteOptions::default())
+        .map_err(|error| format!("写入媒体标签失败: {}", error))
 }
 
 fn extract_image_author(path: &Path) -> Option<String> {
@@ -400,5 +451,13 @@ mod tests {
             split_contributing_artists(" 作者A；频道名、嘉宾B | 作者A "),
             vec!["作者A", "频道名", "嘉宾B"]
         );
+    }
+
+    #[test]
+    fn limits_tag_cleanup_to_supported_containers() {
+        assert!(supports_tag_cleanup(Path::new("track.mp3")));
+        assert!(supports_tag_cleanup(Path::new("movie.mp4")));
+        assert!(!supports_tag_cleanup(Path::new("movie.mkv")));
+        assert!(!supports_tag_cleanup(Path::new("movie.mov")));
     }
 }
