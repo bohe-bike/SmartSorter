@@ -79,6 +79,8 @@ pub struct MediaFile {
     pub modified_at: String,
     #[serde(default)]
     pub sha256: String,
+    #[serde(default)]
+    pub release_to_root: bool,
     pub checked: bool,
 }
 

@@ -83,7 +83,11 @@ const checkedPaths = computed(() => {
       .map((file) => file.path),
   );
   const unmatchedPaths = result.value.unmatched_files
-    .filter((file) => file.checked && keywordAssignments.value[file.path])
+    .filter(
+      (file) =>
+        file.checked &&
+        (file.release_to_root || keywordAssignments.value[file.path]),
+    )
     .map((file) => file.path);
   return [...groupedPaths, ...unmatchedPaths];
 });
@@ -105,7 +109,11 @@ const totalSelectedSize = computed(() => {
     );
   }, 0);
   const unmatchedSize = result.value.unmatched_files
-    .filter((file) => file.checked && keywordAssignments.value[file.path])
+    .filter(
+      (file) =>
+        file.checked &&
+        (file.release_to_root || keywordAssignments.value[file.path]),
+    )
     .reduce((sum, file) => sum + file.size_bytes, 0);
   return groupedSize + unmatchedSize;
 });
@@ -162,7 +170,14 @@ const filteredGroups = computed(() => {
 const remainingUnmatched = computed(() => {
   if (!result.value) return 0;
   return result.value.unmatched_files.filter(
-    (file) => !keywordAssignments.value[file.path],
+    (file) => !file.release_to_root && !keywordAssignments.value[file.path],
+  ).length;
+});
+
+const releaseToRootCount = computed(() => {
+  if (!result.value) return 0;
+  return result.value.unmatched_files.filter(
+    (file) => file.release_to_root && file.checked,
   ).length;
 });
 
@@ -430,7 +445,11 @@ function groupCheckedCount(group: KeywordGroup): number {
 }
 
 function assignKeyword(filePath: string, keyword: string) {
-  keywordAssignments.value[filePath] = keyword;
+  if (keyword) {
+    keywordAssignments.value[filePath] = keyword;
+  } else {
+    delete keywordAssignments.value[filePath];
+  }
 }
 
 function toggleCollapse(keyword: string) {
@@ -832,7 +851,7 @@ function hasCoverEvidence(file: MediaFile): boolean {
 
       <!-- 未匹配文件提示 -->
         <div v-if="unmatchedFiles.length > 0" class="unmatched-section">
-          <div class="panel-title">📭 待确认文件（默认保持原位）</div>
+          <div class="panel-title">📭 待确认与待释放文件</div>
         <div
           v-for="file in unmatchedFiles"
           :key="file.path"
@@ -841,6 +860,7 @@ function hasCoverEvidence(file: MediaFile): boolean {
           <input type="checkbox" v-model="file.checked" />
           <span class="unmatched-name" :title="file.evidence.join('、')">
             {{ file.file_name }} · 置信度 {{ file.confidence }}%
+            <span v-if="file.release_to_root" class="release-label">移到根目录</span>
           </span>
           <select
             class="keyword-select"
@@ -853,7 +873,8 @@ function hasCoverEvidence(file: MediaFile): boolean {
               )
             "
           >
-            <option value="" disabled>请选择关键字</option>
+            <option v-if="file.release_to_root" value="">移到扫描根目录</option>
+            <option v-else value="" disabled>请选择关键字</option>
             <option v-for="kw in selectableKeywords(file)" :key="kw" :value="kw">
               {{ kw }}
             </option>
@@ -915,6 +936,10 @@ function hasCoverEvidence(file: MediaFile): boolean {
         <div v-if="remainingUnmatched > 0" class="message-box">
           有
           {{ remainingUnmatched }} 个文件因无可靠归属或候选分数接近，将保持原位不动。
+        </div>
+
+        <div v-if="releaseToRootCount > 0" class="message-box">
+          {{ releaseToRootCount }} 个文件来自已取消的分类目录，将移到扫描根目录；目录清空后会自动删除。
         </div>
 
         <div v-if="executionMessage" class="message-box success-msg">
@@ -1513,6 +1538,13 @@ function hasCoverEvidence(file: MediaFile): boolean {
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--color-text-secondary);
+}
+
+.release-label {
+  margin-left: 8px;
+  color: var(--color-primary);
+  font-size: 11px;
+  font-weight: 600;
 }
 
 .keyword-select {

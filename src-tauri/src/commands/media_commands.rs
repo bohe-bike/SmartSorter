@@ -139,9 +139,10 @@ async fn scan_media_with_keywords(
         ));
     }
 
-    // ① 收集当前文件夹下的子文件夹名作为关键字
-    let mut folder_keywords: Vec<String> = Vec::new();
-    if saved_keywords.is_none() && sources.contains("folder_name") {
+    // ① 收集扫描根目录下的一级文件夹。应用已保存关键词组时仍需保留这份列表，
+    // 用来识别已经从关键词组中移除、需要拆散重新归类的旧分类目录。
+    let mut direct_folder_names: Vec<String> = Vec::new();
+    if sources.contains("folder_name") {
         for root_path in &paths {
             let root = Path::new(root_path);
             if !root.is_dir() {
@@ -152,14 +153,19 @@ async fn scan_media_with_keywords(
                     if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
                         let name = entry.file_name().to_string_lossy().trim().to_string();
                         // 过滤空名称及极短名称（避免单字符误匹配大量文件）
-                        if name.chars().count() >= 2 && !folder_keywords.contains(&name) {
-                            folder_keywords.push(name);
+                        if name.chars().count() >= 2 && !direct_folder_names.contains(&name) {
+                            direct_folder_names.push(name);
                         }
                     }
                 }
             }
         }
     }
+    let folder_keywords = if saved_keywords.is_none() {
+        direct_folder_names.clone()
+    } else {
+        Vec::new()
+    };
 
     // ② 先在阻塞线程中快速扫描文件路径（不提取元数据）
     let (paths_for_scan, filters_for_scan) = (paths.clone(), filters.clone());
@@ -335,6 +341,14 @@ async fn scan_media_with_keywords(
         merge_containing_keywords(&all_keywords)
     };
     let normalized_folder_keywords = build_normalized_keyword_map(&merged_map);
+    let retired_folder_keys = build_retired_folder_keys(
+        &direct_folder_names,
+        &merged_map,
+        &alias_map,
+        &creator_exclusions,
+        dimension,
+        is_saved_keyword_group,
+    );
     // merged_map: 原始关键字 → 合并后关键字（最短的那个）
     let mut final_keywords: Vec<String> = merged_map
         .values()
@@ -439,14 +453,20 @@ async fn scan_media_with_keywords(
             .map(|(_, candidate)| candidate.evidence.clone())
             .unwrap_or_default();
         let snapshot_ready = !sha256.is_empty();
-        if !snapshot_ready {
-            evidence.push("无法生成文件内容快照，禁止执行归类".into());
-        }
+        let release_to_root = direct_child_folder_name(path, &paths)
+            .map(|folder| retired_folder_keys.contains(&normalize_match_text(&folder)))
+            .unwrap_or(false);
         let runner_up = ranked
             .get(1)
             .map(|(_, candidate)| candidate.score)
             .unwrap_or(0);
         let auto_classifiable = is_auto_classifiable(confidence, runner_up);
+        if !snapshot_ready {
+            evidence.push("无法生成文件内容快照，禁止执行归类".into());
+        }
+        if release_to_root && !auto_classifiable {
+            evidence.push("所属分类已从关键字列表移除，将移到扫描根目录".into());
+        }
 
         let modified_at = std::fs::metadata(path)
             .ok()
@@ -463,10 +483,11 @@ async fn scan_media_with_keywords(
             matched_keywords,
             confidence,
             evidence,
-            requires_confirmation: !auto_classifiable || !snapshot_ready,
+            requires_confirmation: (!auto_classifiable && !release_to_root) || !snapshot_ready,
             modified_at,
             sha256: sha256.clone(),
-            checked: auto_classifiable && snapshot_ready,
+            release_to_root,
+            checked: (auto_classifiable || release_to_root) && snapshot_ready,
         };
 
         if !auto_classifiable {
@@ -709,21 +730,38 @@ pub fn preview_media_classify(
                 file.path
             ));
         }
-        let keyword = request
-            .keyword_assignments
-            .get(&file.path)
-            .ok_or_else(|| format!("未匹配文件 {} 尚未选择归属关键字", file.path))?;
-        if file.matched_keywords.is_empty() {
-            if !available_keywords.contains(keyword.as_str()) {
-                return Err(format!("文件 {} 的归属关键字无效", file.path));
-            }
-        } else if !file.matched_keywords.contains(keyword) {
-            return Err(format!("文件 {} 的归属关键字不在匹配候选中", file.path));
-        }
-
         let source = Path::new(&file.path);
         let root_dir = find_root_dir(source, &scan_result.source_paths);
-        let base_target = build_target_path(source, keyword, &root_dir)?;
+        let assigned_keyword = request
+            .keyword_assignments
+            .get(&file.path)
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|keyword| !keyword.is_empty());
+        let (base_target, action_desc) = if let Some(keyword) = assigned_keyword {
+            if file.matched_keywords.is_empty() {
+                if !available_keywords.contains(keyword) {
+                    return Err(format!("文件 {} 的归属关键字无效", file.path));
+                }
+            } else if !file
+                .matched_keywords
+                .iter()
+                .any(|candidate| candidate == keyword)
+            {
+                return Err(format!("文件 {} 的归属关键字不在匹配候选中", file.path));
+            }
+            (
+                build_target_path(source, keyword, &root_dir)?,
+                format!("移动到 {} 并重命名", keyword),
+            )
+        } else if file.release_to_root {
+            (
+                build_release_target_path(source, &root_dir)?,
+                "移出已取消的分类目录".into(),
+            )
+        } else {
+            return Err(format!("未匹配文件 {} 尚未选择归属关键字", file.path));
+        };
         let target = resolve_unique_target(base_target, &mut used_targets);
 
         if paths_equal(target.as_path(), source) {
@@ -733,11 +771,13 @@ pub fn preview_media_classify(
         items.push(ClassifyPreviewItem {
             source_path: file.path.clone(),
             target_path: target.to_string_lossy().into_owned(),
-            action_desc: format!("移动到 {} 并重命名", keyword),
+            action_desc,
             size_bytes: file.size_bytes,
             sha256: file.sha256.clone(),
         });
-        append_learning_hints(&mut learning_hints, file, keyword);
+        if let Some(keyword) = assigned_keyword {
+            append_learning_hints(&mut learning_hints, file, keyword);
+        }
     }
 
     let preview = ClassifyPreviewResult {
@@ -933,6 +973,13 @@ fn build_target_path(source: &Path, keyword: &str, root_dir: &Path) -> Result<Pa
 
     let target = root_dir.join(&safe_keyword).join(&new_name);
     Ok(target)
+}
+
+fn build_release_target_path(source: &Path, root_dir: &Path) -> Result<PathBuf, String> {
+    let file_name = source
+        .file_name()
+        .ok_or_else(|| "无法读取待释放文件名".to_string())?;
+    Ok(root_dir.join(file_name))
 }
 
 /// 找到文件对应的扫描根目录（Windows 上大小写不敏感）
@@ -1140,6 +1187,42 @@ fn build_alias_map(aliases: &[KeywordAlias]) -> HashMap<String, String> {
         }
     }
     result
+}
+
+fn build_retired_folder_keys(
+    folder_names: &[String],
+    merged_keywords: &HashMap<String, String>,
+    aliases: &HashMap<String, String>,
+    creator_exclusions: &HashSet<String>,
+    dimension: ClassificationDimension,
+    is_saved_keyword_group: bool,
+) -> HashSet<String> {
+    let active_keys = merged_keywords
+        .iter()
+        .flat_map(|(source, target)| [source, target])
+        .map(|keyword| normalize_match_text(keyword))
+        .collect::<HashSet<_>>();
+
+    folder_names
+        .iter()
+        .filter(|folder| {
+            let explicitly_excluded =
+                matches!(
+                    dimension,
+                    ClassificationDimension::Creator | ClassificationDimension::All
+                ) && is_creator_keyword_excluded(folder, aliases, creator_exclusions);
+            if explicitly_excluded {
+                return true;
+            }
+            if !is_saved_keyword_group {
+                return false;
+            }
+            let folder_key = normalize_match_text(folder);
+            let canonical_key = normalize_match_text(&canonical_keyword(folder, aliases));
+            !active_keys.contains(&folder_key) && !active_keys.contains(&canonical_key)
+        })
+        .map(|folder| normalize_match_text(folder))
+        .collect()
 }
 
 fn canonical_keyword(keyword: &str, aliases: &HashMap<String, String>) -> String {
@@ -1518,6 +1601,72 @@ mod tests {
         assert_eq!(std::fs::metadata(&file).unwrap().len(), size);
         assert!(validate_media_snapshot(&file, size, &hash).is_err());
 
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn excluded_or_removed_folder_keywords_are_marked_for_release() {
+        let folders = vec!["作者A".to_string(), "频道名".to_string()];
+        let active = HashMap::from([("作者A".to_string(), "作者A".to_string())]);
+        let exclusions = HashSet::from([normalize_match_text("频道名")]);
+
+        let dynamic_retired = build_retired_folder_keys(
+            &folders,
+            &active,
+            &HashMap::new(),
+            &exclusions,
+            ClassificationDimension::Creator,
+            false,
+        );
+        assert!(dynamic_retired.contains(&normalize_match_text("频道名")));
+        assert!(!dynamic_retired.contains(&normalize_match_text("作者A")));
+
+        let saved_retired = build_retired_folder_keys(
+            &folders,
+            &active,
+            &HashMap::new(),
+            &HashSet::new(),
+            ClassificationDimension::Creator,
+            true,
+        );
+        assert!(saved_retired.contains(&normalize_match_text("频道名")));
+    }
+
+    #[test]
+    fn active_canonical_alias_folder_is_not_released() {
+        let folders = vec!["作者别名".to_string()];
+        let active = HashMap::from([("标准作者".to_string(), "标准作者".to_string())]);
+        let aliases = HashMap::from([(normalize_match_text("作者别名"), "标准作者".to_string())]);
+
+        let retired = build_retired_folder_keys(
+            &folders,
+            &active,
+            &aliases,
+            &HashSet::new(),
+            ClassificationDimension::Creator,
+            true,
+        );
+
+        assert!(retired.is_empty());
+    }
+
+    #[test]
+    fn release_target_uses_scan_root_and_empty_directories_are_removed() {
+        let root = std::env::temp_dir().join(format!("smart-sorter-release-{}", Uuid::new_v4()));
+        let retired = root.join("旧分类").join("子目录");
+        let source = retired.join("track.mp3");
+        std::fs::create_dir_all(&retired).unwrap();
+        std::fs::write(&source, "media").unwrap();
+
+        assert_eq!(
+            build_release_target_path(&source, &root).unwrap(),
+            root.join("track.mp3")
+        );
+        std::fs::remove_file(&source).unwrap();
+        remove_empty_dir_recursive(&retired, &HashSet::from([root.clone()])).unwrap();
+
+        assert!(!root.join("旧分类").exists());
+        assert!(root.exists());
         std::fs::remove_dir_all(root).unwrap();
     }
 

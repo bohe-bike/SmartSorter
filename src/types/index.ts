@@ -281,6 +281,7 @@ export interface MediaFile {
   requires_confirmation: boolean;
   modified_at: string;
   sha256: string;
+  release_to_root: boolean;
   checked: boolean;
 }
 
