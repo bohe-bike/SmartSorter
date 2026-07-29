@@ -25,7 +25,10 @@ pub enum MediaType {
 /// 从文件中提取到的所有元数据字段
 #[derive(Debug, Clone, Default)]
 pub struct MediaMetadata {
+    /// 首位参与艺术家，保留给需要单一作者值的既有调用方。
     pub artist: Option<String>,
+    /// 音频/视频的参与艺术家，按标签中的原始顺序拆分。
+    pub contributing_artists: Vec<String>,
     pub album_artist: Option<String>,
     pub album: Option<String>,
     pub composer: Option<String>,
@@ -137,20 +140,19 @@ fn extract_tagged_media_all(path: &Path) -> MediaMetadata {
                 .filter(|picture| !picture.data().is_empty())
                 .map(|picture| hash_cover_art(picture.data()));
         }
-        if meta.artist.is_none() {
-            if let Some(text) = tag.artist() {
-                let s = text.to_string();
-                if !s.trim().is_empty() {
-                    meta.artist = normalize_author(s);
-                }
-            }
-        }
-        if meta.artist.is_none() {
-            if let Some(text) = tag.get_string(&lofty::tag::ItemKey::TrackArtist) {
-                let s = text.to_string();
-                if !s.trim().is_empty() {
-                    meta.artist = normalize_author(s);
-                }
+        if meta.contributing_artists.is_empty() {
+            let contributing_artists = tag
+                .artist()
+                .map(|text| text.into_owned())
+                .or_else(|| {
+                    tag.get_string(&lofty::tag::ItemKey::TrackArtist)
+                        .map(str::to_owned)
+                })
+                .map(|text| split_contributing_artists(&text))
+                .unwrap_or_default();
+            if let Some(primary_artist) = contributing_artists.first() {
+                meta.artist = Some(primary_artist.clone());
+                meta.contributing_artists = contributing_artists;
             }
         }
         if meta.album_artist.is_none() {
@@ -184,6 +186,22 @@ fn extract_tagged_media_all(path: &Path) -> MediaMetadata {
 
 fn hash_cover_art(data: &[u8]) -> String {
     format!("{:x}", Sha256::digest(data))
+}
+
+fn split_contributing_artists(value: &str) -> Vec<String> {
+    let mut artists = Vec::new();
+    for part in value.split(|ch| matches!(ch, ';' | '；' | '、' | '|')) {
+        let Some(artist) = normalize_author(part.to_string()) else {
+            continue;
+        };
+        if !artists
+            .iter()
+            .any(|existing: &String| existing.eq_ignore_ascii_case(&artist))
+        {
+            artists.push(artist);
+        }
+    }
+    artists
 }
 
 fn extract_ebook_author(path: &Path) -> Option<String> {
@@ -373,6 +391,14 @@ mod tests {
         assert_eq!(
             get_media_type(Path::new("video.wmv")),
             Some(MediaType::Video)
+        );
+    }
+
+    #[test]
+    fn splits_contributing_artists_in_tag_order() {
+        assert_eq!(
+            split_contributing_artists(" 作者A；频道名、嘉宾B | 作者A "),
+            vec!["作者A", "频道名", "嘉宾B"]
         );
     }
 }

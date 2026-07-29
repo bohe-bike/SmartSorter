@@ -224,8 +224,12 @@ async fn scan_media_with_keywords(
     let mut metadata_keywords: HashSet<String> = HashSet::new();
     for (_, _, meta) in &media_files {
         if sources.contains("artist") {
-            if let Some(ref v) = meta.artist {
-                metadata_keywords.insert(v.clone());
+            if meta.contributing_artists.is_empty() {
+                if let Some(ref artist) = meta.artist {
+                    metadata_keywords.insert(artist.clone());
+                }
+            } else {
+                metadata_keywords.extend(meta.contributing_artists.iter().cloned());
             }
         }
         if sources.contains("album_artist") {
@@ -1239,8 +1243,43 @@ fn build_text_candidates(
         }
     }
 
+    if sources.contains("artist") {
+        if meta.contributing_artists.is_empty() {
+            if let Some(value) = meta.artist.as_deref() {
+                add_metadata_matches(
+                    &mut candidates,
+                    value,
+                    keywords,
+                    aliases,
+                    is_saved_keyword_group,
+                    95,
+                    60,
+                    "artist",
+                );
+            }
+        } else {
+            for (index, artist) in meta.contributing_artists.iter().enumerate() {
+                let (exact_score, partial_score, evidence) = if index == 0 {
+                    (95, 60, "参与艺术家（首位）".to_string())
+                } else {
+                    // 后续成员常包含频道名或协作者，因此保留为候选但不单独自动归类。
+                    (70, 45, format!("参与艺术家（第 {} 位）", index + 1))
+                };
+                add_metadata_matches(
+                    &mut candidates,
+                    artist,
+                    keywords,
+                    aliases,
+                    is_saved_keyword_group,
+                    exact_score,
+                    partial_score,
+                    &evidence,
+                );
+            }
+        }
+    }
+
     for (source, value, exact_score, partial_score) in [
-        ("artist", meta.artist.as_deref(), 95, 60),
         ("album_artist", meta.album_artist.as_deref(), 92, 60),
         ("album", meta.album.as_deref(), 95, 60),
         ("composer", meta.composer.as_deref(), 80, 55),
@@ -1249,18 +1288,39 @@ fn build_text_candidates(
             continue;
         }
         if let Some(value) = value {
-            for keyword in keywords {
-                if let Some(score) =
-                    metadata_match_score(value, keyword, exact_score, partial_score)
-                {
-                    let target = match_target_keyword(keyword, aliases, is_saved_keyword_group);
-                    add_candidate(&mut candidates, &target, score, source);
-                }
-            }
+            add_metadata_matches(
+                &mut candidates,
+                value,
+                keywords,
+                aliases,
+                is_saved_keyword_group,
+                exact_score,
+                partial_score,
+                source,
+            );
         }
     }
 
     candidates
+}
+
+#[allow(clippy::too_many_arguments)]
+fn add_metadata_matches(
+    candidates: &mut HashMap<String, CandidateScore>,
+    value: &str,
+    keywords: &[String],
+    aliases: &HashMap<String, String>,
+    is_saved_keyword_group: bool,
+    exact_score: u8,
+    partial_score: u8,
+    evidence: &str,
+) {
+    for keyword in keywords {
+        if let Some(score) = metadata_match_score(value, keyword, exact_score, partial_score) {
+            let target = match_target_keyword(keyword, aliases, is_saved_keyword_group);
+            add_candidate(candidates, &target, score, evidence);
+        }
+    }
 }
 
 fn rank_candidates(candidates: HashMap<String, CandidateScore>) -> Vec<(String, CandidateScore)> {
@@ -1426,6 +1486,30 @@ mod tests {
         assert_eq!(candidates["Alice"].score, 100);
         assert!(candidates["Alice"].score >= AUTO_CLASSIFY_THRESHOLD);
         assert!(candidates["Alice"].score - candidates["Album"].score >= AUTO_CLASSIFY_MARGIN);
+    }
+
+    #[test]
+    fn primary_contributing_artist_scores_higher_than_later_entries() {
+        let meta = metadata::MediaMetadata {
+            artist: Some("Alice".into()),
+            contributing_artists: vec!["Alice".into(), "Channel".into()],
+            ..Default::default()
+        };
+        let candidates = build_text_candidates(
+            Path::new("work.mp3"),
+            &[],
+            &["Alice".into(), "Channel".into()],
+            &HashMap::new(),
+            &HashMap::new(),
+            false,
+            &HashSet::from(["artist".into()]),
+            &meta,
+        );
+
+        assert_eq!(candidates["Alice"].score, 95);
+        assert_eq!(candidates["Channel"].score, 70);
+        assert!(is_auto_classifiable(candidates["Alice"].score, 0));
+        assert!(!is_auto_classifiable(candidates["Channel"].score, 0));
     }
 
     #[test]
