@@ -161,14 +161,33 @@ async fn scan_media_with_keywords(
 
     // ② 先在阻塞线程中快速扫描文件路径（不提取元数据）
     let (paths_for_scan, filters_for_scan) = (paths.clone(), filters.clone());
+    let app_for_scan = app.clone();
+    let task_id_for_scan = task_id.clone();
     let raw_files: Vec<(PathBuf, u64)> = tauri::async_runtime::spawn_blocking(move || {
         let mut files = Vec::new();
+        let mut visited_files = 0u64;
         for root_path in &paths_for_scan {
             let root = Path::new(root_path);
             if !root.exists() {
                 continue;
             }
-            for file in scanner::scan_directory(root, recursive, None) {
+            let scanned_files =
+                scanner::scan_directory_with_progress(root, recursive, None, |file| {
+                    visited_files += 1;
+                    if visited_files == 1 || visited_files % 100 == 0 {
+                        let _ = app_for_scan.emit(
+                            "progress",
+                            ProgressPayload {
+                                task_id: task_id_for_scan.clone(),
+                                current: visited_files,
+                                total: 0,
+                                current_file: file.to_string_lossy().into_owned(),
+                                phase: "collecting".into(),
+                            },
+                        );
+                    }
+                });
+            for file in scanned_files {
                 let Some(mt) = metadata::get_media_type(&file) else {
                     continue;
                 };

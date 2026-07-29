@@ -7,6 +7,7 @@ defineProps<{
 }>();
 
 const phaseLabels: Record<string, string> = {
+  collecting: "收集文件中…",
   scanning: "扫描文件中…",
   extracting: "提取作者中…",
   hashing: "计算哈希中…",
@@ -22,6 +23,9 @@ const phaseLabels: Record<string, string> = {
       <span class="phase-label">{{ phaseLabels[phase] || phase }}</span>
       <span class="progress-count" v-if="total > 0"
         >{{ current }} / {{ total }}</span
+      >
+      <span class="progress-count" v-else-if="current > 0"
+        >已遍历 {{ current }} 个文件</span
       >
     </div>
     <div class="progress-track">

@@ -62,6 +62,8 @@ const editableKeywords = ref<string[]>([]);
 const keywordInput = ref("");
 const showKeywordEditor = ref(false);
 const savingKeywordGroup = ref(false);
+const keywordSaveMessage = ref("");
+const keywordSaveState = ref<"success" | "error" | null>(null);
 
 let unlistenProgress: (() => void) | null = null;
 
@@ -179,6 +181,11 @@ function resetProgress(phase: string) {
   progress.value = { current: 0, total: 0, currentFile: "", phase };
 }
 
+function clearKeywordSaveMessage() {
+  keywordSaveMessage.value = "";
+  keywordSaveState.value = null;
+}
+
 async function prepareProgressListener() {
   if (unlistenProgress) {
     unlistenProgress();
@@ -197,22 +204,25 @@ async function prepareProgressListener() {
 
 async function generateKeywords() {
   if (
+    scanning.value ||
     sourcePaths.value.length === 0 ||
     selectedMediaTypes.value.length === 0
   ) {
     return;
   }
 
+  const hadKeywordEditor = showKeywordEditor.value;
   scanning.value = true;
   preview.value = null;
   executionMessage.value = "";
   keywordAssignments.value = {};
   collapsedGroups.value = new Set();
   keywordFilter.value = "";
-  resetProgress("scanning");
-  await prepareProgressListener();
+  showKeywordEditor.value = false;
+  resetProgress("collecting");
 
   try {
+    await prepareProgressListener();
     const generated = await scanMediaAuthors(
       sourcePaths.value,
       recursive.value,
@@ -223,9 +233,11 @@ async function generateKeywords() {
     editableKeywords.value = generated.keywords.map((item) => item.keyword);
     keywordGroupName.value = "";
     editingKeywordGroupId.value = undefined;
+    clearKeywordSaveMessage();
     showKeywordEditor.value = true;
     result.value = null;
   } catch (error) {
+    showKeywordEditor.value = hadKeywordEditor;
     alert("扫描失败: " + error);
   } finally {
     scanning.value = false;
@@ -246,17 +258,21 @@ function addKeyword() {
   if (!keyword) return;
   editableKeywords.value.push(keyword);
   keywordInput.value = "";
+  clearKeywordSaveMessage();
 }
 
 function removeKeyword(index: number) {
   editableKeywords.value.splice(index, 1);
+  clearKeywordSaveMessage();
 }
 
 async function saveKeywordGroup() {
   if (!keywordGroupName.value.trim() || editableKeywords.value.length === 0) {
     return;
   }
+  const isUpdate = Boolean(editingKeywordGroupId.value);
   savingKeywordGroup.value = true;
+  clearKeywordSaveMessage();
   try {
     const saved = await saveMediaKeywordGroup({
       id: editingKeywordGroupId.value,
@@ -272,8 +288,11 @@ async function saveKeywordGroup() {
     selectedKeywordGroupId.value = saved.id;
     editingKeywordGroupId.value = saved.id;
     editableKeywords.value = [...saved.keywords];
+    keywordSaveState.value = "success";
+    keywordSaveMessage.value = `已${isUpdate ? "更新" : "保存"}关键词组「${saved.name}」，共 ${saved.keywords.length} 个关键词`;
   } catch (error) {
-    alert("保存关键词组失败: " + error);
+    keywordSaveState.value = "error";
+    keywordSaveMessage.value = "保存失败: " + String(error);
   } finally {
     savingKeywordGroup.value = false;
   }
@@ -285,6 +304,7 @@ function editKeywordGroup(group: MediaKeywordGroup) {
   editingKeywordGroupId.value = group.id;
   keywordGroupName.value = group.name;
   editableKeywords.value = [...group.keywords];
+  clearKeywordSaveMessage();
   showKeywordEditor.value = true;
   result.value = null;
   preview.value = null;
@@ -310,6 +330,7 @@ async function deleteKeywordGroup() {
       editingKeywordGroupId.value = undefined;
       keywordGroupName.value = "";
       editableKeywords.value = [];
+      clearKeywordSaveMessage();
       showKeywordEditor.value = false;
     }
     result.value = null;
@@ -321,6 +342,7 @@ async function deleteKeywordGroup() {
 
 async function applyKeywordGroup() {
   if (
+    scanning.value ||
     !selectedKeywordGroupId.value ||
     sourcePaths.value.length === 0 ||
     selectedMediaTypes.value.length === 0
@@ -333,9 +355,9 @@ async function applyKeywordGroup() {
   keywordAssignments.value = {};
   collapsedGroups.value = new Set();
   keywordFilter.value = "";
-  resetProgress("scanning");
-  await prepareProgressListener();
+  resetProgress("collecting");
   try {
+    await prepareProgressListener();
     result.value = await applyMediaKeywordGroup(
       sourcePaths.value,
       recursive.value,
@@ -663,7 +685,13 @@ function hasCoverEvidence(file: MediaFile): boolean {
         "
         @click="generateKeywords"
       >
-        {{ scanning ? "生成中…" : "生成关键词" }}
+        {{
+          scanning
+            ? "重新生成中…"
+            : showKeywordEditor
+              ? "重新生成关键词"
+              : "生成关键词"
+        }}
       </button>
       <button
         v-else
@@ -711,6 +739,7 @@ function hasCoverEvidence(file: MediaFile): boolean {
           id="keyword-group-name"
           v-model="keywordGroupName"
           placeholder="例如：常用作者"
+          @input="clearKeywordSaveMessage"
         />
       </div>
       <div class="keyword-add-row">
@@ -725,9 +754,21 @@ function hasCoverEvidence(file: MediaFile): boolean {
       </div>
       <div class="editable-keyword-list">
         <div v-for="(_, index) in editableKeywords" :key="index" class="editable-keyword-row">
-          <input v-model="editableKeywords[index]" aria-label="关键词" />
+          <input
+            v-model="editableKeywords[index]"
+            aria-label="关键词"
+            @input="clearKeywordSaveMessage"
+          />
           <button class="btn-exclusion-remove" title="删除关键词" @click="removeKeyword(index)">×</button>
         </div>
+      </div>
+      <div
+        v-if="keywordSaveMessage"
+        class="message-box keyword-save-message"
+        :class="keywordSaveState === 'success' ? 'success-msg' : 'error-msg'"
+        role="status"
+      >
+        {{ keywordSaveMessage }}
       </div>
     </section>
 
@@ -1506,6 +1547,11 @@ function hasCoverEvidence(file: MediaFile): boolean {
 
 .success-msg {
   border-left: 3px solid var(--color-success);
+}
+
+.error-msg {
+  border-left: 3px solid var(--color-danger);
+  color: var(--color-danger);
 }
 
 /* 预览头部操作区 */
