@@ -21,6 +21,8 @@ pub static MEDIA_PREVIEW_CACHE: Mutex<Option<ClassifyPreviewResult>> = Mutex::ne
 
 const AUTO_CLASSIFY_THRESHOLD: u8 = 80;
 const AUTO_CLASSIFY_MARGIN: u8 = 15;
+// 封面不能单独证明作者归属，仅用于加强已经存在的文本候选。
+const EXACT_COVER_ART_SCORE: u8 = 22;
 
 #[derive(Debug, Clone, Copy)]
 enum ClassificationDimension {
@@ -70,6 +72,12 @@ impl ClassificationDimension {
 struct CandidateScore {
     score: u8,
     evidence: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct CoverArtEvidence {
+    keyword: String,
+    anchor_count: u64,
 }
 
 #[command]
@@ -344,7 +352,19 @@ async fn scan_media_with_keywords(
         });
     }
 
-    // ⑥ 汇集证据并评分。只有高置信度且显著领先的候选才自动归类。
+    // ⑥ 先用纯文本证据建立封面锚点。只有同一封面对应唯一的高置信度
+    // 关键字时，才允许它参与后续的补强评分。
+    let cover_art_evidence = build_cover_art_evidence(
+        &media_files,
+        &paths,
+        &final_keywords,
+        &normalized_folder_keywords,
+        &alias_map,
+        is_saved_keyword_group,
+        &sources,
+    );
+
+    // ⑦ 汇集证据并评分。只有高置信度且显著领先的候选才自动归类。
     let mut no_match_count = 0u64;
     let mut unmatched_files: Vec<MediaFile> = Vec::new();
     let mut grouped: HashMap<String, Vec<MediaFile>> = HashMap::new();
@@ -365,58 +385,35 @@ async fn scan_media_with_keywords(
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let file_stem = path
-            .file_stem()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-
-        let mut candidates: HashMap<String, CandidateScore> = HashMap::new();
-        for kw in &final_keywords {
-            if let Some(score) = filename_match_score(&file_stem, kw) {
-                let target = match_target_keyword(kw, &alias_map, is_saved_keyword_group);
-                add_candidate(&mut candidates, &target, score, "文件名");
-            }
-        }
-
-        if sources.contains("folder_name") {
-            if let Some(folder_name) = direct_child_folder_name(path, &paths) {
-                if let Some(keyword) =
-                    normalized_folder_keywords.get(&normalize_match_text(&folder_name))
-                {
-                    let target = match_target_keyword(keyword, &alias_map, is_saved_keyword_group);
-                    add_candidate(&mut candidates, &target, 100, "所属子文件夹");
+        let mut candidates = build_text_candidates(
+            path,
+            &paths,
+            &final_keywords,
+            &normalized_folder_keywords,
+            &alias_map,
+            is_saved_keyword_group,
+            &sources,
+            meta,
+        );
+        if let Some(cover_hash) = meta.cover_art_hash.as_deref() {
+            if let Some(cover) = cover_art_evidence.get(cover_hash) {
+                // 封面只加强已由文件名、目录或标签指向同一关键字的候选；
+                // 没有文字证据时仍保持待确认，避免把专辑/频道封面误当作者。
+                if candidates.contains_key(&cover.keyword) {
+                    add_candidate(
+                        &mut candidates,
+                        &cover.keyword,
+                        EXACT_COVER_ART_SCORE,
+                        &format!(
+                            "封面与“{}”的 {} 个高置信度文件完全一致",
+                            cover.keyword, cover.anchor_count
+                        ),
+                    );
                 }
             }
         }
 
-        for (source, value, exact_score, partial_score) in [
-            ("artist", meta.artist.as_deref(), 95, 60),
-            ("album_artist", meta.album_artist.as_deref(), 92, 60),
-            ("album", meta.album.as_deref(), 95, 60),
-            ("composer", meta.composer.as_deref(), 80, 55),
-        ] {
-            if !sources.contains(source) {
-                continue;
-            }
-            if let Some(value) = value {
-                for kw in &final_keywords {
-                    if let Some(score) = metadata_match_score(value, kw, exact_score, partial_score)
-                    {
-                        let target = match_target_keyword(kw, &alias_map, is_saved_keyword_group);
-                        add_candidate(&mut candidates, &target, score, source);
-                    }
-                }
-            }
-        }
-
-        let mut ranked: Vec<(String, CandidateScore)> = candidates.into_iter().collect();
-        ranked.sort_by(|(left_keyword, left), (right_keyword, right)| {
-            right.score.cmp(&left.score).then_with(|| {
-                left_keyword
-                    .to_lowercase()
-                    .cmp(&right_keyword.to_lowercase())
-            })
-        });
+        let ranked = rank_candidates(candidates);
         let matched_keywords: Vec<String> =
             ranked.iter().map(|(keyword, _)| keyword.clone()).collect();
         let confidence = ranked
@@ -431,8 +428,7 @@ async fn scan_media_with_keywords(
             .get(1)
             .map(|(_, candidate)| candidate.score)
             .unwrap_or(0);
-        let auto_classifiable = confidence >= AUTO_CLASSIFY_THRESHOLD
-            && confidence.saturating_sub(runner_up) >= AUTO_CLASSIFY_MARGIN;
+        let auto_classifiable = is_auto_classifiable(confidence, runner_up);
 
         let modified_at = std::fs::metadata(path)
             .ok()
@@ -467,7 +463,7 @@ async fn scan_media_with_keywords(
         grouped.entry(primary_keyword).or_default().push(media_file);
     }
 
-    // ⑦ 构建分组结果
+    // ⑧ 构建分组结果
     let mut groups: Vec<KeywordGroup> = grouped
         .into_iter()
         .map(|(keyword, mut files)| {
@@ -1145,6 +1141,145 @@ fn append_learning_hints(hints: &mut Vec<AliasLearningHint>, file: &MediaFile, c
     }
 }
 
+fn build_cover_art_evidence(
+    media_files: &[(PathBuf, u64, metadata::MediaMetadata)],
+    scan_roots: &[String],
+    keywords: &[String],
+    normalized_folder_keywords: &HashMap<String, String>,
+    aliases: &HashMap<String, String>,
+    is_saved_keyword_group: bool,
+    sources: &HashSet<String>,
+) -> HashMap<String, CoverArtEvidence> {
+    let mut owners_by_cover: HashMap<String, HashMap<String, u64>> = HashMap::new();
+
+    for (path, _, meta) in media_files {
+        let Some(cover_hash) = meta.cover_art_hash.as_ref() else {
+            continue;
+        };
+        let ranked = rank_candidates(build_text_candidates(
+            path,
+            scan_roots,
+            keywords,
+            normalized_folder_keywords,
+            aliases,
+            is_saved_keyword_group,
+            sources,
+            meta,
+        ));
+        let confidence = ranked
+            .first()
+            .map(|(_, candidate)| candidate.score)
+            .unwrap_or(0);
+        let runner_up = ranked
+            .get(1)
+            .map(|(_, candidate)| candidate.score)
+            .unwrap_or(0);
+        if !is_auto_classifiable(confidence, runner_up) {
+            continue;
+        }
+        if let Some((keyword, _)) = ranked.first() {
+            *owners_by_cover
+                .entry(cover_hash.clone())
+                .or_default()
+                .entry(keyword.clone())
+                .or_default() += 1;
+        }
+    }
+
+    owners_by_cover
+        .into_iter()
+        .filter_map(|(cover_hash, owners)| {
+            if owners.len() != 1 {
+                return None;
+            }
+            let (keyword, anchor_count) = owners.into_iter().next()?;
+            Some((
+                cover_hash,
+                CoverArtEvidence {
+                    keyword,
+                    anchor_count,
+                },
+            ))
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_text_candidates(
+    path: &Path,
+    scan_roots: &[String],
+    keywords: &[String],
+    normalized_folder_keywords: &HashMap<String, String>,
+    aliases: &HashMap<String, String>,
+    is_saved_keyword_group: bool,
+    sources: &HashSet<String>,
+    meta: &metadata::MediaMetadata,
+) -> HashMap<String, CandidateScore> {
+    let mut candidates = HashMap::new();
+    let file_stem = path
+        .file_stem()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+
+    for keyword in keywords {
+        if let Some(score) = filename_match_score(&file_stem, keyword) {
+            let target = match_target_keyword(keyword, aliases, is_saved_keyword_group);
+            add_candidate(&mut candidates, &target, score, "文件名");
+        }
+    }
+
+    if sources.contains("folder_name") {
+        if let Some(folder_name) = direct_child_folder_name(path, scan_roots) {
+            if let Some(keyword) =
+                normalized_folder_keywords.get(&normalize_match_text(&folder_name))
+            {
+                let target = match_target_keyword(keyword, aliases, is_saved_keyword_group);
+                add_candidate(&mut candidates, &target, 100, "所属子文件夹");
+            }
+        }
+    }
+
+    for (source, value, exact_score, partial_score) in [
+        ("artist", meta.artist.as_deref(), 95, 60),
+        ("album_artist", meta.album_artist.as_deref(), 92, 60),
+        ("album", meta.album.as_deref(), 95, 60),
+        ("composer", meta.composer.as_deref(), 80, 55),
+    ] {
+        if !sources.contains(source) {
+            continue;
+        }
+        if let Some(value) = value {
+            for keyword in keywords {
+                if let Some(score) =
+                    metadata_match_score(value, keyword, exact_score, partial_score)
+                {
+                    let target = match_target_keyword(keyword, aliases, is_saved_keyword_group);
+                    add_candidate(&mut candidates, &target, score, source);
+                }
+            }
+        }
+    }
+
+    candidates
+}
+
+fn rank_candidates(candidates: HashMap<String, CandidateScore>) -> Vec<(String, CandidateScore)> {
+    let mut ranked: Vec<(String, CandidateScore)> = candidates.into_iter().collect();
+    ranked.sort_by(|(left_keyword, left), (right_keyword, right)| {
+        right.score.cmp(&left.score).then_with(|| {
+            left_keyword
+                .to_lowercase()
+                .cmp(&right_keyword.to_lowercase())
+        })
+    });
+    ranked
+}
+
+fn is_auto_classifiable(confidence: u8, runner_up: u8) -> bool {
+    confidence >= AUTO_CLASSIFY_THRESHOLD
+        && confidence.saturating_sub(runner_up) >= AUTO_CLASSIFY_MARGIN
+}
+
 fn add_candidate(
     candidates: &mut HashMap<String, CandidateScore>,
     keyword: &str,
@@ -1291,6 +1426,49 @@ mod tests {
         assert_eq!(candidates["Alice"].score, 100);
         assert!(candidates["Alice"].score >= AUTO_CLASSIFY_THRESHOLD);
         assert!(candidates["Alice"].score - candidates["Album"].score >= AUTO_CLASSIFY_MARGIN);
+    }
+
+    #[test]
+    fn exact_cover_only_strengthens_an_existing_text_candidate() {
+        let mut candidates = HashMap::new();
+        add_candidate(&mut candidates, "Alice", 60, "artist");
+        let cover = CoverArtEvidence {
+            keyword: "Alice".into(),
+            anchor_count: 3,
+        };
+
+        if candidates.contains_key(&cover.keyword) {
+            add_candidate(
+                &mut candidates,
+                &cover.keyword,
+                EXACT_COVER_ART_SCORE,
+                "封面与“Alice”的 3 个高置信度文件完全一致",
+            );
+        }
+        let ranked = rank_candidates(candidates);
+
+        assert_eq!(ranked[0].0, "Alice");
+        assert_eq!(ranked[0].1.score, 82);
+        assert!(is_auto_classifiable(ranked[0].1.score, 0));
+    }
+
+    #[test]
+    fn conflicting_cover_owners_are_not_used_as_evidence() {
+        let owners = HashMap::from([("Alice".to_string(), 2u64), ("Bob".to_string(), 1u64)]);
+
+        let evidence = if owners.len() == 1 {
+            owners
+                .into_iter()
+                .next()
+                .map(|(keyword, anchor_count)| CoverArtEvidence {
+                    keyword,
+                    anchor_count,
+                })
+        } else {
+            None
+        };
+
+        assert!(evidence.is_none());
     }
 
     #[test]

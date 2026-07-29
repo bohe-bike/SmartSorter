@@ -515,6 +515,10 @@ function mediaIcon(type: string): string {
   if (type === "ebook") return "📚";
   return "📄";
 }
+
+function hasCoverEvidence(file: MediaFile): boolean {
+  return file.evidence.some((item) => item.startsWith("封面与“"));
+}
 </script>
 
 <template>
@@ -614,6 +618,11 @@ function mediaIcon(type: string): string {
       <div v-if="workflowMode === 'keywords'" class="filter-row">
         <span class="filter-label">生成来源</span>
         <span>子文件夹、作者/艺术家、专辑艺术家、专辑名、作曲家</span>
+      </div>
+
+      <div class="filter-row">
+        <span class="filter-label">辅助证据</span>
+        <span>内嵌封面完全一致时增强已有文本匹配，不会单独自动归类</span>
       </div>
 
       <div v-if="workflowMode === 'classify'" class="filter-row">
@@ -931,6 +940,13 @@ function mediaIcon(type: string): string {
               <span class="file-name">{{ file.file_name }}</span>
               <span v-if="file.matched_keywords.length > 1" class="match-badge">
                 {{ file.matched_keywords.length }}匹配
+              </span>
+              <span
+                v-if="hasCoverEvidence(file)"
+                class="cover-evidence"
+                :title="file.evidence.join('、')"
+              >
+                🖼 封面一致
               </span>
               <span class="file-date">{{ formatDate(file.modified_at) }}</span>
               <span class="file-path" :title="file.path">{{ file.path }}</span>
@@ -1480,6 +1496,12 @@ function mediaIcon(type: string): string {
   border-radius: 3px;
   background: rgba(221, 156, 0, 0.12);
   color: var(--color-warning);
+}
+
+.cover-evidence {
+  flex-shrink: 0;
+  color: var(--color-success);
+  font-size: 11px;
 }
 
 .success-msg {

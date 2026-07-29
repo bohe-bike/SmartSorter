@@ -5,11 +5,13 @@ use std::path::Path;
 use exif::{In, Reader as ExifReader, Tag, Value};
 use lofty::config::ParseOptions;
 use lofty::file::TaggedFileExt;
+use lofty::picture::PictureType;
 use lofty::probe::Probe;
 use lofty::tag::Accessor;
 use lopdf::{Document, Object};
 use quick_xml::events::Event;
 use quick_xml::Reader;
+use sha2::{Digest, Sha256};
 use zip::ZipArchive;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,6 +29,8 @@ pub struct MediaMetadata {
     pub album_artist: Option<String>,
     pub album: Option<String>,
     pub composer: Option<String>,
+    /// 嵌入式封面的精确内容哈希。仅用于归类辅助，不向前端传输封面数据。
+    pub cover_art_hash: Option<String>,
 }
 
 pub fn get_media_type(path: &Path) -> Option<MediaType> {
@@ -126,6 +130,13 @@ fn extract_tagged_media_all(path: &Path) -> MediaMetadata {
     let mut meta = MediaMetadata::default();
 
     for tag in tagged.tags() {
+        if meta.cover_art_hash.is_none() {
+            meta.cover_art_hash = tag
+                .get_picture_type(PictureType::CoverFront)
+                .or_else(|| tag.pictures().first())
+                .filter(|picture| !picture.data().is_empty())
+                .map(|picture| hash_cover_art(picture.data()));
+        }
         if meta.artist.is_none() {
             if let Some(text) = tag.artist() {
                 let s = text.to_string();
@@ -169,6 +180,10 @@ fn extract_tagged_media_all(path: &Path) -> MediaMetadata {
     }
 
     meta
+}
+
+fn hash_cover_art(data: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(data))
 }
 
 fn extract_ebook_author(path: &Path) -> Option<String> {
