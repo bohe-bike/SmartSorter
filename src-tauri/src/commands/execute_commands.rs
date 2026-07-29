@@ -91,6 +91,8 @@ pub async fn execute_task(app: AppHandle, request: ExecuteTaskRequest) -> Result
                     error_message: Some(format!("预览已过期，已跳过: {}", error)),
                     reversible: false,
                     target_hash: None,
+                    backup_path: None,
+                    backup_hash: None,
                 });
             }
             continue;
@@ -121,6 +123,8 @@ pub async fn execute_task(app: AppHandle, request: ExecuteTaskRequest) -> Result
                     error_message: Some("前置操作未成功，已跳过".into()),
                     reversible: false,
                     target_hash: None,
+                    backup_path: None,
+                    backup_hash: None,
                 });
                 continue;
             }
@@ -152,6 +156,8 @@ pub async fn execute_task(app: AppHandle, request: ExecuteTaskRequest) -> Result
                 error_message: outcome.error_message,
                 reversible,
                 target_hash,
+                backup_path: None,
+                backup_hash: None,
             });
         }
     }

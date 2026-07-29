@@ -1,6 +1,6 @@
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{BufReader, Read};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use exif::{In, Reader as ExifReader, Tag, Value};
 use lofty::config::{ParseOptions, WriteOptions};
@@ -12,7 +12,10 @@ use lopdf::{Document, Object};
 use quick_xml::events::Event;
 use quick_xml::Reader;
 use sha2::{Digest, Sha256};
+use uuid::Uuid;
 use zip::ZipArchive;
+
+use crate::engine::executor;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MediaType {
@@ -109,6 +112,48 @@ pub fn clean_tags_and_set_artist(path: &Path, artist: &str) -> Result<(), String
     }
     let artist =
         normalize_author(artist.to_string()).ok_or_else(|| "作者名称不能为空".to_string())?;
+    let original_cover_hash = extract_tagged_media_all(path).cover_art_hash;
+    let stage = sibling_work_path(path, "tag-stage")?;
+    let rollback = sibling_work_path(path, "tag-rollback")?;
+    executor::safe_copy(path, &stage)?;
+
+    let write_result = rewrite_tags_in_place(&stage, &artist).and_then(|_| {
+        let cleaned = extract_tagged_media_all(&stage);
+        if cleaned.artist.as_deref() != Some(artist.as_str())
+            || cleaned.album_artist.as_deref() != Some(artist.as_str())
+        {
+            return Err("标签写入后校验失败，Artist 或 AlbumArtist 不匹配".into());
+        }
+        if original_cover_hash.is_some() && cleaned.cover_art_hash != original_cover_hash {
+            return Err("标签写入后校验失败，内嵌封面未被完整保留".into());
+        }
+        Ok(())
+    });
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(&stage);
+        return Err(error);
+    }
+
+    if let Err(error) = fs::rename(path, &rollback) {
+        let _ = fs::remove_file(&stage);
+        return Err(format!("暂存原媒体文件失败: {}", error));
+    }
+    if let Err(error) = fs::rename(&stage, path) {
+        let rollback_error = fs::rename(&rollback, path).err();
+        let _ = fs::remove_file(&stage);
+        return Err(match rollback_error {
+            Some(rollback_error) => format!(
+                "替换媒体文件失败: {}；恢复原文件也失败: {}",
+                error, rollback_error
+            ),
+            None => format!("替换媒体文件失败，已恢复原文件: {}", error),
+        });
+    }
+    let _ = fs::remove_file(&rollback);
+    Ok(())
+}
+
+fn rewrite_tags_in_place(path: &Path, artist: &str) -> Result<(), String> {
     let mut tagged = Probe::open(path)
         .map_err(|error| format!("打开媒体文件失败: {}", error))?
         .options(ParseOptions::new())
@@ -126,8 +171,8 @@ pub fn clean_tags_and_set_artist(path: &Path, artist: &str) -> Result<(), String
         .flat_map(|tag| tag.pictures().iter().cloned())
         .collect::<Vec<_>>();
     let mut clean_tag = LoftyTag::new(tag_type);
-    if !clean_tag.insert_text(ItemKey::TrackArtist, artist.clone())
-        || !clean_tag.insert_text(ItemKey::AlbumArtist, artist)
+    if !clean_tag.insert_text(ItemKey::TrackArtist, artist.to_string())
+        || !clean_tag.insert_text(ItemKey::AlbumArtist, artist.to_string())
     {
         return Err("该媒体格式无法写入 Artist 或 AlbumArtist".into());
     }
@@ -140,6 +185,22 @@ pub fn clean_tags_and_set_artist(path: &Path, artist: &str) -> Result<(), String
     tagged
         .save_to_path(path, WriteOptions::default())
         .map_err(|error| format!("写入媒体标签失败: {}", error))
+}
+
+fn sibling_work_path(path: &Path, purpose: &str) -> Result<PathBuf, String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| "无法确定媒体文件所在目录".to_string())?;
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .ok_or_else(|| "媒体文件名无效".to_string())?;
+    Ok(parent.join(format!(
+        ".smartsorter-{}-{}-{}",
+        purpose,
+        Uuid::new_v4(),
+        file_name
+    )))
 }
 
 fn extract_image_author(path: &Path) -> Option<String> {

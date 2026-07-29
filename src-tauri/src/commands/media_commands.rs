@@ -824,6 +824,8 @@ pub async fn execute_media_classify(app: AppHandle, task_id: String) -> Result<S
             error_message,
             reversible: target_hash.is_some(),
             target_hash,
+            backup_path: None,
+            backup_hash: None,
         });
     }
 

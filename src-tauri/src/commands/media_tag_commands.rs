@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -6,7 +7,7 @@ use chrono::Local;
 use tauri::{command, AppHandle, Emitter, Manager};
 use uuid::Uuid;
 
-use crate::engine::{metadata, scanner};
+use crate::engine::{executor, hasher, metadata, scanner};
 use crate::models::log::{ExecutionLog, ExecutionSummary, Operation, OperationStatus, UndoStatus};
 use crate::models::media_tag_cleanup::{
     MediaTagCleanupExecuteRequest, MediaTagCleanupFile, MediaTagCleanupResult,
@@ -21,11 +22,13 @@ pub async fn scan_media_tag_cleanup(
     app: AppHandle,
     paths: Vec<String>,
     recursive: bool,
+    author_folder_mode: String,
 ) -> Result<MediaTagCleanupResult, String> {
     if paths.is_empty() {
         return Err("请至少选择一个扫描目录".into());
     }
 
+    let author_folder_mode = AuthorFolderMode::parse(&author_folder_mode)?;
     let task_id = Uuid::new_v4().to_string();
     let _ = app.emit(
         "progress",
@@ -113,8 +116,13 @@ pub async fn scan_media_tag_cleanup(
                 },
             );
             let media = metadata::extract_all_metadata(&path);
-            let (target_artist, author_source) =
-                infer_target_artist(&path, &paths_for_author, &aliases, media.artist.as_deref());
+            let (target_artist, author_source) = infer_target_artist(
+                &path,
+                &paths_for_author,
+                &aliases,
+                media.artist.as_deref(),
+                author_folder_mode,
+            );
             let supported = metadata::supports_tag_cleanup(&path);
             let skip_reason = if !supported {
                 Some("该格式暂不支持安全标签清洗".to_string())
@@ -150,6 +158,7 @@ pub async fn scan_media_tag_cleanup(
     let result = MediaTagCleanupResult {
         task_id,
         source_paths: paths,
+        author_folder_mode: author_folder_mode.as_str().into(),
         scanned_count: total,
         ready_count,
         files,
@@ -229,6 +238,10 @@ pub async fn execute_media_tag_cleanup(
                     .or(file.target_artist.as_deref())
                     .map(str::trim)
                     .filter(|artist| !artist.is_empty());
+                let mut backup_path = None;
+                let mut backup_hash = None;
+                let mut target_hash = None;
+                let mut reversible = false;
                 let (status, error_message, artist_label) = if !file.supported {
                     skipped += 1;
                     (
@@ -239,14 +252,53 @@ pub async fn execute_media_tag_cleanup(
                         String::new(),
                     )
                 } else if let Some(artist) = target_artist {
-                    match metadata::clean_tags_and_set_artist(Path::new(&file.path), artist) {
-                        Ok(()) => {
-                            succeeded += 1;
-                            (OperationStatus::Success, None, artist.to_string())
+                    let media_path = Path::new(&file.path);
+                    match create_tag_backup(&data_dir, &task_id, media_path) {
+                        Ok((created_backup, created_hash)) => {
+                            backup_path = Some(created_backup.to_string_lossy().into_owned());
+                            backup_hash = Some(created_hash);
+                            match metadata::clean_tags_and_set_artist(media_path, artist) {
+                                Ok(()) => match hasher::compute_sha256(media_path) {
+                                    Ok(cleaned_hash) => {
+                                        succeeded += 1;
+                                        target_hash = Some(cleaned_hash);
+                                        reversible = true;
+                                        (OperationStatus::Success, None, artist.to_string())
+                                    }
+                                    Err(error) => {
+                                        failed += 1;
+                                        (
+                                            OperationStatus::Failed,
+                                            Some(format!(
+                                                "标签已写入，但无法生成撤销校验哈希；原文件备份保留在 {}: {}",
+                                                created_backup.display(),
+                                                error
+                                            )),
+                                            artist.to_string(),
+                                        )
+                                    }
+                                },
+                                Err(error) => {
+                                    failed += 1;
+                                    (
+                                        OperationStatus::Failed,
+                                        Some(format!(
+                                            "{}；原文件备份保留在 {}",
+                                            error,
+                                            created_backup.display()
+                                        )),
+                                        artist.to_string(),
+                                    )
+                                }
+                            }
                         }
                         Err(error) => {
                             failed += 1;
-                            (OperationStatus::Failed, Some(error), artist.to_string())
+                            (
+                                OperationStatus::Failed,
+                                Some(format!("创建原文件备份失败，未执行标签清洗: {}", error)),
+                                artist.to_string(),
+                            )
                         }
                     }
                 } else {
@@ -268,8 +320,10 @@ pub async fn execute_media_tag_cleanup(
                     },
                     status,
                     error_message,
-                    reversible: false,
-                    target_hash: None,
+                    reversible,
+                    target_hash,
+                    backup_path,
+                    backup_hash,
                 });
             }
 
@@ -286,7 +340,14 @@ pub async fn execute_media_tag_cleanup(
                     skipped,
                 },
                 operations: operations.clone(),
-                undo_status: UndoStatus::Expired,
+                undo_status: if operations
+                    .iter()
+                    .any(|operation| operation.status == OperationStatus::Success)
+                {
+                    UndoStatus::Available
+                } else {
+                    UndoStatus::Expired
+                },
             };
             log_store::append(&data_dir, &log)?;
             Ok::<_, String>((succeeded, failed, skipped, operations))
@@ -303,16 +364,42 @@ pub async fn execute_media_tag_cleanup(
     ))
 }
 
+fn create_tag_backup(
+    data_dir: &Path,
+    task_id: &str,
+    source: &Path,
+) -> Result<(PathBuf, String), String> {
+    let backup_dir = data_dir.join("media_tag_backups").join(task_id);
+    fs::create_dir_all(&backup_dir).map_err(|error| format!("创建标签备份目录失败: {}", error))?;
+    let backup = backup_dir.join(Uuid::new_v4().to_string());
+    executor::safe_copy(source, &backup)?;
+    match hasher::compute_sha256(&backup) {
+        Ok(hash) => Ok((backup, hash)),
+        Err(error) => {
+            let _ = fs::remove_file(&backup);
+            Err(format!("校验标签备份失败: {}", error))
+        }
+    }
+}
+
 fn infer_target_artist(
     path: &Path,
     roots: &[String],
     aliases: &HashMap<String, String>,
     current_artist: Option<&str>,
+    folder_mode: AuthorFolderMode,
 ) -> (Option<String>, String) {
-    if let Some(folder) = direct_child_folder_name(path, roots) {
+    let folder = match folder_mode {
+        AuthorFolderMode::Children => direct_child_folder_name(path, roots),
+        AuthorFolderMode::Selected => selected_root_folder_name(path, roots),
+    };
+    if let Some(folder) = folder {
         return (
             Some(canonical_author(&folder, aliases)),
-            "一级作者目录".into(),
+            match folder_mode {
+                AuthorFolderMode::Children => "一级作者目录".into(),
+                AuthorFolderMode::Selected => "所选作者目录".into(),
+            },
         );
     }
     if let Some(artist) = current_artist
@@ -325,6 +412,29 @@ fn infer_target_artist(
         );
     }
     (None, "未识别".into())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuthorFolderMode {
+    Children,
+    Selected,
+}
+
+impl AuthorFolderMode {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "children" => Ok(Self::Children),
+            "selected" => Ok(Self::Selected),
+            _ => Err("作者目录层级无效，请重新选择".into()),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Children => "children",
+            Self::Selected => "selected",
+        }
+    }
 }
 
 fn direct_child_folder_name(path: &Path, roots: &[String]) -> Option<String> {
@@ -344,6 +454,19 @@ fn direct_child_folder_name(path: &Path, roots: &[String]) -> Option<String> {
     parts.next()?;
     let author = author.trim();
     (!author.is_empty()).then(|| author.to_string())
+}
+
+fn selected_root_folder_name(path: &Path, roots: &[String]) -> Option<String> {
+    roots
+        .iter()
+        .map(PathBuf::from)
+        .filter(|root| path_is_within(path, root))
+        .max_by_key(|root| root.components().count())?
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
 }
 
 fn canonical_author(author: &str, aliases: &HashMap<String, String>) -> String {
@@ -396,6 +519,7 @@ mod tests {
             &[r"D:\Media".to_string()],
             &aliases,
             Some("旧作者"),
+            AuthorFolderMode::Children,
         );
 
         assert_eq!(artist.as_deref(), Some("标准作者"));
@@ -409,9 +533,24 @@ mod tests {
             &[r"D:\Media".to_string()],
             &HashMap::new(),
             Some("作者A"),
+            AuthorFolderMode::Children,
         );
 
         assert_eq!(artist.as_deref(), Some("作者A"));
         assert_eq!(source, "现有 Artist 标签");
+    }
+
+    #[test]
+    fn selected_author_folder_mode_uses_the_selected_root_name() {
+        let (artist, source) = infer_target_artist(
+            Path::new(r"D:\Media\作者A\专辑B\work.mp3"),
+            &[r"D:\Media\作者A".to_string()],
+            &HashMap::new(),
+            Some("旧作者"),
+            AuthorFolderMode::Selected,
+        );
+
+        assert_eq!(artist.as_deref(), Some("作者A"));
+        assert_eq!(source, "所选作者目录");
     }
 }

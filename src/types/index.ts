@@ -306,9 +306,12 @@ export interface ClassifyPreviewResult {
 
 // ========== 媒体标签清洗 ==========
 
+export type AuthorFolderMode = "children" | "selected";
+
 export interface MediaTagCleanupResult {
   task_id: string;
   source_paths: string[];
+  author_folder_mode: AuthorFolderMode;
   scanned_count: number;
   ready_count: number;
   files: MediaTagCleanupFile[];
@@ -362,6 +365,8 @@ export interface Operation {
   error_message: string | null;
   reversible: boolean;
   target_hash: string | null;
+  backup_path?: string | null;
+  backup_hash?: string | null;
 }
 
 // ========== 进度事件 ==========

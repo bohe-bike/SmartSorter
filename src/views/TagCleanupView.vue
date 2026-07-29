@@ -8,6 +8,7 @@ import {
   scanMediaTagCleanup,
 } from "../utils/tauriApi";
 import type {
+  AuthorFolderMode,
   MediaTagCleanupFile,
   MediaTagCleanupResult,
   ProgressEvent,
@@ -15,6 +16,7 @@ import type {
 
 const sourcePaths = ref<string[]>([]);
 const recursive = ref(true);
+const authorFolderMode = ref<AuthorFolderMode | null>(null);
 const scanning = ref(false);
 const executing = ref(false);
 const result = ref<MediaTagCleanupResult | null>(null);
@@ -41,15 +43,32 @@ const unresolvedCount = computed(
     ).length,
 );
 
+const authorFolderModeLabel = computed(() =>
+  authorFolderMode.value === "children"
+    ? "所选目录的下一级文件夹是作者"
+    : authorFolderMode.value === "selected"
+      ? "所选目录本身就是作者文件夹"
+      : "尚未选择作者目录层级",
+);
+
 async function addFolder() {
   const path = await pickFolder();
   if (path && !sourcePaths.value.includes(path)) {
     sourcePaths.value.push(path);
+    result.value = null;
+    message.value = "";
   }
 }
 
 function removePath(index: number) {
   sourcePaths.value.splice(index, 1);
+  result.value = null;
+  message.value = "";
+}
+
+function invalidateScanResult() {
+  result.value = null;
+  message.value = "";
 }
 
 function resetProgress(phase: string) {
@@ -76,7 +95,8 @@ function cleanupProgress() {
 }
 
 async function scanFiles() {
-  if (scanning.value || sourcePaths.value.length === 0) return;
+  const folderMode = authorFolderMode.value;
+  if (scanning.value || sourcePaths.value.length === 0 || !folderMode) return;
 
   scanning.value = true;
   message.value = "";
@@ -84,7 +104,11 @@ async function scanFiles() {
   resetProgress("collecting");
   try {
     await prepareProgressListener();
-    result.value = await scanMediaTagCleanup(sourcePaths.value, recursive.value);
+    result.value = await scanMediaTagCleanup(
+      sourcePaths.value,
+      recursive.value,
+      folderMode,
+    );
   } catch (error) {
     message.value = "扫描失败: " + String(error);
   } finally {
@@ -118,7 +142,7 @@ async function executeCleanup() {
   if (!result.value || selectedFiles.value.length === 0 || executing.value) return;
   if (
     !confirm(
-      `将清除 ${selectedFiles.value.length} 个文件的描述标签，并写入 Artist 和 AlbumArtist。内嵌封面会保留，操作不可撤销。是否继续？`,
+      `目录模式：${authorFolderModeLabel.value}\n\n将清洗 ${selectedFiles.value.length} 个文件，并写入 Artist 和 AlbumArtist。系统会先创建完整原文件备份，完成后可在历史记录中撤销；备份会占用额外磁盘空间。是否继续？`,
     )
   ) {
     return;
@@ -173,7 +197,7 @@ onUnmounted(cleanupProgress);
       <div class="section-head">
         <span class="label">扫描目录</span>
         <label class="recursive-toggle">
-          <input v-model="recursive" type="checkbox" /> 递归子目录
+          <input v-model="recursive" type="checkbox" @change="invalidateScanResult" /> 递归子目录
         </label>
       </div>
       <div class="source-list">
@@ -183,10 +207,23 @@ onUnmounted(cleanupProgress);
         </div>
         <button class="btn-add" @click="addFolder">+ 选择文件夹</button>
       </div>
-      <div class="scan-note">
-        优先使用扫描目录下的一级作者文件夹；根目录散文件才使用已有 Artist 标签。支持 MP3、FLAC、M4A、OGG、WAV、MP4、M4V。
+      <div class="folder-mode-row">
+        <span class="label">作者目录层级</span>
+        <div class="folder-mode-control">
+          <label :class="{ active: authorFolderMode === 'children' }">
+            <input v-model="authorFolderMode" type="radio" value="children" @change="invalidateScanResult" />
+            下一级是作者
+          </label>
+          <label :class="{ active: authorFolderMode === 'selected' }">
+            <input v-model="authorFolderMode" type="radio" value="selected" @change="invalidateScanResult" />
+            所选目录是作者
+          </label>
+        </div>
       </div>
-      <button class="btn-scan" :disabled="scanning || sourcePaths.length === 0" @click="scanFiles">
+      <div class="scan-note">
+        当前模式：{{ authorFolderModeLabel }}。无法从目录推断时才使用已有 Artist 标签。支持 MP3、FLAC、M4A、OGG、WAV、MP4、M4V。
+      </div>
+      <button class="btn-scan" :disabled="scanning || sourcePaths.length === 0 || !authorFolderMode" @click="scanFiles">
         {{ scanning ? "扫描中…" : result ? "重新扫描" : "扫描媒体标签" }}
       </button>
       <ProgressBar
@@ -211,7 +248,7 @@ onUnmounted(cleanupProgress);
       </div>
 
       <div class="warning-note">
-        清洗会删除可写描述标签，仅保留内嵌封面，并写入 Artist / AlbumArtist。执行后不可从历史记录撤销。
+        清洗会删除可写描述标签，仅保留内嵌封面，并写入 Artist / AlbumArtist。每个文件都会创建完整备份，可从历史记录撤销。
       </div>
 
       <div class="table-toolbar">
@@ -324,6 +361,46 @@ onUnmounted(cleanupProgress);
   flex-direction: column;
   gap: 6px;
   margin-top: 10px;
+}
+
+.folder-mode-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 10px;
+}
+
+.folder-mode-control {
+  display: flex;
+  min-height: 32px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.folder-mode-control label {
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  padding: 0 10px;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+}
+
+.folder-mode-control label + label {
+  border-left: 1px solid var(--color-border);
+}
+
+.folder-mode-control label.active {
+  background: var(--color-primary);
+  color: #fff;
+}
+
+.folder-mode-control input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
 }
 
 .source-item {
@@ -532,6 +609,16 @@ onUnmounted(cleanupProgress);
 }
 
 @media (max-width: 920px) {
+  .folder-mode-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .folder-mode-control label {
+    flex: 1;
+    justify-content: center;
+  }
+
   .file-row {
     align-items: flex-start;
     flex-wrap: wrap;

@@ -5,6 +5,7 @@ use std::collections::HashMap;
 pub struct MediaTagCleanupResult {
     pub task_id: String,
     pub source_paths: Vec<String>,
+    pub author_folder_mode: String,
     pub scanned_count: u64,
     pub ready_count: u64,
     pub files: Vec<MediaTagCleanupFile>,
