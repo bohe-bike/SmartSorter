@@ -280,6 +280,7 @@ export interface MediaFile {
   evidence: string[];
   requires_confirmation: boolean;
   modified_at: string;
+  sha256: string;
   checked: boolean;
 }
 
@@ -296,6 +297,7 @@ export interface ClassifyPreviewItem {
   target_path: string;
   action_desc: string;
   size_bytes: number;
+  sha256: string;
 }
 
 export interface ClassifyPreviewResult {
@@ -321,6 +323,7 @@ export interface MediaTagCleanupFile {
   path: string;
   file_name: string;
   size_bytes: number;
+  sha256: string;
   media_type: "audio" | "video" | "unknown";
   current_artist: string | null;
   target_artist: string | null;

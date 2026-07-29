@@ -124,8 +124,15 @@ pub async fn scan_media_tag_cleanup(
                 author_folder_mode,
             );
             let supported = metadata::supports_tag_cleanup(&path);
+            let sha256 = if supported {
+                hasher::compute_sha256(&path).unwrap_or_default()
+            } else {
+                String::new()
+            };
             let skip_reason = if !supported {
                 Some("该格式暂不支持安全标签清洗".to_string())
+            } else if sha256.is_empty() {
+                Some("无法生成文件内容快照，请检查文件是否可读取".to_string())
             } else if target_artist.is_none() {
                 Some("未找到一级作者目录，且文件没有可用的 Artist 标签".to_string())
             } else {
@@ -138,6 +145,7 @@ pub async fn scan_media_tag_cleanup(
                     .map(|name| name.to_string_lossy().into_owned())
                     .unwrap_or_default(),
                 size_bytes,
+                sha256: sha256.clone(),
                 media_type: metadata::media_type_label(&path)
                     .unwrap_or("unknown")
                     .to_string(),
@@ -146,7 +154,7 @@ pub async fn scan_media_tag_cleanup(
                 author_source,
                 supported,
                 skip_reason,
-                checked: supported && target_artist.is_some(),
+                checked: supported && target_artist.is_some() && !sha256.is_empty(),
             });
         }
         files
@@ -253,42 +261,71 @@ pub async fn execute_media_tag_cleanup(
                     )
                 } else if let Some(artist) = target_artist {
                     let media_path = Path::new(&file.path);
-                    match create_tag_backup(&data_dir, &task_id, media_path) {
+                    if file.sha256.is_empty() {
+                        failed += 1;
+                        (
+                            OperationStatus::Failed,
+                            Some("文件缺少内容快照，请重新扫描后再执行标签清洗".into()),
+                            artist.to_string(),
+                        )
+                    } else {
+                        match create_tag_backup(&data_dir, &task_id, media_path) {
                         Ok((created_backup, created_hash)) => {
-                            backup_path = Some(created_backup.to_string_lossy().into_owned());
-                            backup_hash = Some(created_hash);
-                            match metadata::clean_tags_and_set_artist(media_path, artist) {
-                                Ok(()) => match hasher::compute_sha256(media_path) {
-                                    Ok(cleaned_hash) => {
-                                        succeeded += 1;
-                                        target_hash = Some(cleaned_hash);
-                                        reversible = true;
-                                        (OperationStatus::Success, None, artist.to_string())
-                                    }
+                            if created_hash != file.sha256 {
+                                let _ = fs::remove_file(&created_backup);
+                                if let Some(parent) = created_backup.parent() {
+                                    let _ = fs::remove_dir(parent);
+                                }
+                                failed += 1;
+                                (
+                                    OperationStatus::Failed,
+                                    Some(
+                                        "文件内容在扫描后发生变化，已拒绝执行标签清洗"
+                                            .into(),
+                                    ),
+                                    artist.to_string(),
+                                )
+                            } else {
+                                backup_path = Some(created_backup.to_string_lossy().into_owned());
+                                backup_hash = Some(created_hash);
+                                match metadata::clean_tags_and_set_artist(
+                                    media_path,
+                                    &created_backup,
+                                    artist,
+                                    &file.sha256,
+                                ) {
+                                    Ok(()) => match hasher::compute_sha256(media_path) {
+                                        Ok(cleaned_hash) => {
+                                            succeeded += 1;
+                                            target_hash = Some(cleaned_hash);
+                                            reversible = true;
+                                            (OperationStatus::Success, None, artist.to_string())
+                                        }
+                                        Err(error) => {
+                                            failed += 1;
+                                            (
+                                                OperationStatus::Failed,
+                                                Some(format!(
+                                                    "标签已写入，但无法生成撤销校验哈希；原文件备份保留在 {}: {}",
+                                                    created_backup.display(),
+                                                    error
+                                                )),
+                                                artist.to_string(),
+                                            )
+                                        }
+                                    },
                                     Err(error) => {
                                         failed += 1;
                                         (
                                             OperationStatus::Failed,
                                             Some(format!(
-                                                "标签已写入，但无法生成撤销校验哈希；原文件备份保留在 {}: {}",
+                                                "{}；原文件备份保留在 {}",
+                                                error,
                                                 created_backup.display(),
-                                                error
                                             )),
                                             artist.to_string(),
                                         )
                                     }
-                                },
-                                Err(error) => {
-                                    failed += 1;
-                                    (
-                                        OperationStatus::Failed,
-                                        Some(format!(
-                                            "{}；原文件备份保留在 {}",
-                                            error,
-                                            created_backup.display()
-                                        )),
-                                        artist.to_string(),
-                                    )
                                 }
                             }
                         }
@@ -299,6 +336,7 @@ pub async fn execute_media_tag_cleanup(
                                 Some(format!("创建原文件备份失败，未执行标签清洗: {}", error)),
                                 artist.to_string(),
                             )
+                        }
                         }
                     }
                 } else {
@@ -371,7 +409,12 @@ fn create_tag_backup(
 ) -> Result<(PathBuf, String), String> {
     let backup_dir = data_dir.join("media_tag_backups").join(task_id);
     fs::create_dir_all(&backup_dir).map_err(|error| format!("创建标签备份目录失败: {}", error))?;
-    let backup = backup_dir.join(Uuid::new_v4().to_string());
+    let extension = source
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| format!(".{}", extension))
+        .unwrap_or_default();
+    let backup = backup_dir.join(format!("{}{}", Uuid::new_v4(), extension));
     executor::safe_copy(source, &backup)?;
     match hasher::compute_sha256(&backup) {
         Ok(hash) => Ok((backup, hash)),
@@ -510,6 +553,27 @@ fn path_key(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tag_backup_preserves_extension_and_content_hash() {
+        let root = std::env::temp_dir().join(format!("smart-sorter-tag-backup-{}", Uuid::new_v4()));
+        let data_dir = root.join("data");
+        let source = root.join("track.mp3");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&source, "media bytes").unwrap();
+        let source_hash = hasher::compute_sha256(&source).unwrap();
+
+        let (backup, backup_hash) = create_tag_backup(&data_dir, "task", &source).unwrap();
+
+        assert_eq!(
+            backup.extension().and_then(|value| value.to_str()),
+            Some("mp3")
+        );
+        assert_eq!(backup_hash, source_hash);
+        assert_eq!(std::fs::read(&backup).unwrap(), b"media bytes");
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn prefers_the_organized_author_folder_over_an_existing_tag() {

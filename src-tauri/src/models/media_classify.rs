@@ -77,6 +77,8 @@ pub struct MediaFile {
     pub evidence: Vec<String>,
     pub requires_confirmation: bool,
     pub modified_at: String,
+    #[serde(default)]
+    pub sha256: String,
     pub checked: bool,
 }
 
@@ -93,6 +95,8 @@ pub struct ClassifyPreviewItem {
     pub target_path: String,
     pub action_desc: String,
     pub size_bytes: u64,
+    #[serde(default)]
+    pub sha256: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

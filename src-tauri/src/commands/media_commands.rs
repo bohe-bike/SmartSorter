@@ -23,6 +23,8 @@ const AUTO_CLASSIFY_THRESHOLD: u8 = 80;
 const AUTO_CLASSIFY_MARGIN: u8 = 15;
 // 封面不能单独证明作者归属，仅用于加强已经存在的文本候选。
 const EXACT_COVER_ART_SCORE: u8 = 22;
+const MIN_COVER_ART_ANCHORS: u64 = 2;
+const MIN_TEXT_SCORE_FOR_COVER: u8 = AUTO_CLASSIFY_THRESHOLD;
 
 #[derive(Debug, Clone, Copy)]
 enum ClassificationDimension {
@@ -217,7 +219,7 @@ async fn scan_media_with_keywords(
     // 在单个阻塞线程中批量提取元数据并发送进度事件（避免逐文件 spawn 开销）
     let app_clone = app.clone();
     let task_id_clone = task_id.clone();
-    let media_files: Vec<(PathBuf, u64, metadata::MediaMetadata)> =
+    let media_files: Vec<(PathBuf, u64, metadata::MediaMetadata, String)> =
         tauri::async_runtime::spawn_blocking(move || {
             let mut files = Vec::new();
             for (index, (path, size_bytes)) in raw_files.into_iter().enumerate() {
@@ -232,7 +234,8 @@ async fn scan_media_with_keywords(
                     },
                 );
                 let meta = metadata::extract_all_metadata(&path);
-                files.push((path, size_bytes, meta));
+                let sha256 = hasher::compute_sha256(&path).unwrap_or_default();
+                files.push((path, size_bytes, meta, sha256));
             }
             files
         })
@@ -241,7 +244,7 @@ async fn scan_media_with_keywords(
 
     // ③ 从元数据中收集关键字
     let mut metadata_keywords: HashSet<String> = HashSet::new();
-    for (_, _, meta) in &media_files {
+    for (_, _, meta, _) in &media_files {
         if sources.contains("artist") {
             if meta.contributing_artists.is_empty() {
                 if let Some(ref artist) = meta.artist {
@@ -392,7 +395,7 @@ async fn scan_media_with_keywords(
     let mut unmatched_files: Vec<MediaFile> = Vec::new();
     let mut grouped: HashMap<String, Vec<MediaFile>> = HashMap::new();
 
-    for (index, (path, size_bytes, meta)) in media_files.iter().enumerate() {
+    for (index, (path, size_bytes, meta, sha256)) in media_files.iter().enumerate() {
         let _ = app.emit(
             "progress",
             ProgressPayload {
@@ -420,19 +423,7 @@ async fn scan_media_with_keywords(
         );
         if let Some(cover_hash) = meta.cover_art_hash.as_deref() {
             if let Some(cover) = cover_art_evidence.get(cover_hash) {
-                // 封面只加强已由文件名、目录或标签指向同一关键字的候选；
-                // 没有文字证据时仍保持待确认，避免把专辑/频道封面误当作者。
-                if candidates.contains_key(&cover.keyword) {
-                    add_candidate(
-                        &mut candidates,
-                        &cover.keyword,
-                        EXACT_COVER_ART_SCORE,
-                        &format!(
-                            "封面与“{}”的 {} 个高置信度文件完全一致",
-                            cover.keyword, cover.anchor_count
-                        ),
-                    );
-                }
+                apply_cover_art_evidence(&mut candidates, cover);
             }
         }
 
@@ -443,10 +434,14 @@ async fn scan_media_with_keywords(
             .first()
             .map(|(_, candidate)| candidate.score)
             .unwrap_or(0);
-        let evidence = ranked
+        let mut evidence = ranked
             .first()
             .map(|(_, candidate)| candidate.evidence.clone())
             .unwrap_or_default();
+        let snapshot_ready = !sha256.is_empty();
+        if !snapshot_ready {
+            evidence.push("无法生成文件内容快照，禁止执行归类".into());
+        }
         let runner_up = ranked
             .get(1)
             .map(|(_, candidate)| candidate.score)
@@ -468,9 +463,10 @@ async fn scan_media_with_keywords(
             matched_keywords,
             confidence,
             evidence,
-            requires_confirmation: !auto_classifiable,
+            requires_confirmation: !auto_classifiable || !snapshot_ready,
             modified_at,
-            checked: auto_classifiable,
+            sha256: sha256.clone(),
+            checked: auto_classifiable && snapshot_ready,
         };
 
         if !auto_classifiable {
@@ -659,6 +655,12 @@ pub fn preview_media_classify(
             if !selected.contains(file.path.as_str()) {
                 continue; // 用户未勾选，跳过
             }
+            if file.sha256.is_empty() {
+                return Err(format!(
+                    "文件 {} 缺少内容快照，请重新扫描后再生成预览",
+                    file.path
+                ));
+            }
 
             // 多匹配必须由用户确认；单匹配可使用其唯一的归属关键字。
             let manually_assigned = request.keyword_assignments.contains_key(&file.path);
@@ -688,6 +690,7 @@ pub fn preview_media_classify(
                 target_path: target.to_string_lossy().into_owned(),
                 action_desc: format!("移动到 {} 并重命名", keyword),
                 size_bytes: file.size_bytes,
+                sha256: file.sha256.clone(),
             });
             if manually_assigned {
                 append_learning_hints(&mut learning_hints, file, &keyword);
@@ -699,6 +702,12 @@ pub fn preview_media_classify(
     for file in &scan_result.unmatched_files {
         if !selected.contains(file.path.as_str()) {
             continue;
+        }
+        if file.sha256.is_empty() {
+            return Err(format!(
+                "文件 {} 缺少内容快照，请重新扫描后再生成预览",
+                file.path
+            ));
         }
         let keyword = request
             .keyword_assignments
@@ -726,6 +735,7 @@ pub fn preview_media_classify(
             target_path: target.to_string_lossy().into_owned(),
             action_desc: format!("移动到 {} 并重命名", keyword),
             size_bytes: file.size_bytes,
+            sha256: file.sha256.clone(),
         });
         append_learning_hints(&mut learning_hints, file, keyword);
     }
@@ -797,7 +807,8 @@ pub async fn execute_media_classify(app: AppHandle, task_id: String) -> Result<S
             source_parents.insert(parent.to_path_buf());
         }
 
-        let result = executor::safe_move(source, target);
+        let result = validate_media_snapshot(source, item.size_bytes, &item.sha256)
+            .and_then(|_| executor::safe_move(source, target));
 
         let (status, error_message) = match &result {
             Ok(()) => {
@@ -1084,6 +1095,31 @@ fn resolve_unique_target(initial: PathBuf, used: &mut HashSet<String>) -> PathBu
     initial
 }
 
+fn validate_media_snapshot(
+    path: &Path,
+    expected_size: u64,
+    expected_hash: &str,
+) -> Result<(), String> {
+    if expected_hash.is_empty() {
+        return Err("扫描时未能生成文件哈希，请重新扫描".into());
+    }
+    let actual_size = std::fs::metadata(path)
+        .map_err(|error| format!("读取源文件信息失败: {}", error))?
+        .len();
+    if actual_size != expected_size {
+        return Err(format!(
+            "文件在扫描后发生变化，大小由 {} 字节变为 {} 字节",
+            expected_size, actual_size
+        ));
+    }
+    let actual_hash = hasher::compute_sha256(path)
+        .map_err(|error| format!("验证源文件 SHA-256 失败: {}", error))?;
+    if actual_hash != expected_hash {
+        return Err("文件内容在扫描后发生变化，已拒绝执行旧归类计划".into());
+    }
+    Ok(())
+}
+
 #[cfg(target_os = "windows")]
 fn path_key(path: &Path) -> String {
     path.to_string_lossy().replace('/', "\\").to_lowercase()
@@ -1167,7 +1203,7 @@ fn append_learning_hints(hints: &mut Vec<AliasLearningHint>, file: &MediaFile, c
 }
 
 fn build_cover_art_evidence(
-    media_files: &[(PathBuf, u64, metadata::MediaMetadata)],
+    media_files: &[(PathBuf, u64, metadata::MediaMetadata, String)],
     scan_roots: &[String],
     keywords: &[String],
     normalized_folder_keywords: &HashMap<String, String>,
@@ -1177,7 +1213,7 @@ fn build_cover_art_evidence(
 ) -> HashMap<String, CoverArtEvidence> {
     let mut owners_by_cover: HashMap<String, HashMap<String, u64>> = HashMap::new();
 
-    for (path, _, meta) in media_files {
+    for (path, _, meta, _) in media_files {
         let Some(cover_hash) = meta.cover_art_hash.as_ref() else {
             continue;
         };
@@ -1214,19 +1250,41 @@ fn build_cover_art_evidence(
     owners_by_cover
         .into_iter()
         .filter_map(|(cover_hash, owners)| {
-            if owners.len() != 1 {
-                return None;
-            }
-            let (keyword, anchor_count) = owners.into_iter().next()?;
-            Some((
-                cover_hash,
-                CoverArtEvidence {
-                    keyword,
-                    anchor_count,
-                },
-            ))
+            unique_cover_owner(owners).map(|evidence| (cover_hash, evidence))
         })
         .collect()
+}
+
+fn unique_cover_owner(owners: HashMap<String, u64>) -> Option<CoverArtEvidence> {
+    if owners.len() != 1 {
+        return None;
+    }
+    let (keyword, anchor_count) = owners.into_iter().next()?;
+    (anchor_count >= MIN_COVER_ART_ANCHORS).then_some(CoverArtEvidence {
+        keyword,
+        anchor_count,
+    })
+}
+
+fn apply_cover_art_evidence(
+    candidates: &mut HashMap<String, CandidateScore>,
+    cover: &CoverArtEvidence,
+) {
+    let has_strong_text_evidence = candidates
+        .get(&cover.keyword)
+        .is_some_and(|candidate| candidate.score >= MIN_TEXT_SCORE_FOR_COVER);
+    if !has_strong_text_evidence {
+        return;
+    }
+    add_candidate(
+        candidates,
+        &cover.keyword,
+        EXACT_COVER_ART_SCORE,
+        &format!(
+            "封面与“{}”的 {} 个高置信度文件完全一致",
+            cover.keyword, cover.anchor_count
+        ),
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1446,6 +1504,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn media_snapshot_detects_same_size_content_replacement() {
+        let root =
+            std::env::temp_dir().join(format!("smart-sorter-media-snapshot-{}", Uuid::new_v4()));
+        let file = root.join("track.mp3");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&file, "original").unwrap();
+        let size = std::fs::metadata(&file).unwrap().len();
+        let hash = hasher::compute_sha256(&file).unwrap();
+
+        assert!(validate_media_snapshot(&file, size, &hash).is_ok());
+        std::fs::write(&file, "modified").unwrap();
+        assert_eq!(std::fs::metadata(&file).unwrap().len(), size);
+        assert!(validate_media_snapshot(&file, size, &hash).is_err());
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn selects_the_longest_matching_scan_root() {
         let source = Path::new(r"D:\Media2\Author\work.mp4");
         let roots = vec![r"D:\Media".to_string(), r"D:\Media2".to_string()];
@@ -1534,7 +1610,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_cover_only_strengthens_an_existing_text_candidate() {
+    fn exact_cover_does_not_promote_weak_text_evidence() {
         let mut candidates = HashMap::new();
         add_candidate(&mut candidates, "Alice", 60, "artist");
         let cover = CoverArtEvidence {
@@ -1542,38 +1618,39 @@ mod tests {
             anchor_count: 3,
         };
 
-        if candidates.contains_key(&cover.keyword) {
-            add_candidate(
-                &mut candidates,
-                &cover.keyword,
-                EXACT_COVER_ART_SCORE,
-                "封面与“Alice”的 3 个高置信度文件完全一致",
-            );
-        }
+        apply_cover_art_evidence(&mut candidates, &cover);
         let ranked = rank_candidates(candidates);
 
         assert_eq!(ranked[0].0, "Alice");
-        assert_eq!(ranked[0].1.score, 82);
-        assert!(is_auto_classifiable(ranked[0].1.score, 0));
+        assert_eq!(ranked[0].1.score, 60);
+        assert!(!is_auto_classifiable(ranked[0].1.score, 0));
     }
 
     #[test]
-    fn conflicting_cover_owners_are_not_used_as_evidence() {
-        let owners = HashMap::from([("Alice".to_string(), 2u64), ("Bob".to_string(), 1u64)]);
-
-        let evidence = if owners.len() == 1 {
-            owners
-                .into_iter()
-                .next()
-                .map(|(keyword, anchor_count)| CoverArtEvidence {
-                    keyword,
-                    anchor_count,
-                })
-        } else {
-            None
+    fn exact_cover_can_strengthen_an_already_strong_text_candidate() {
+        let mut candidates = HashMap::new();
+        add_candidate(&mut candidates, "Alice", 82, "文件名");
+        let cover = CoverArtEvidence {
+            keyword: "Alice".into(),
+            anchor_count: 3,
         };
 
-        assert!(evidence.is_none());
+        apply_cover_art_evidence(&mut candidates, &cover);
+
+        assert_eq!(candidates["Alice"].score, 100);
+    }
+
+    #[test]
+    fn conflicting_or_single_cover_owners_are_not_used_as_evidence() {
+        let owners = HashMap::from([("Alice".to_string(), 2u64), ("Bob".to_string(), 1u64)]);
+        assert!(unique_cover_owner(owners).is_none());
+        assert!(unique_cover_owner(HashMap::from([("Alice".to_string(), 1u64)])).is_none());
+        assert_eq!(
+            unique_cover_owner(HashMap::from([("Alice".to_string(), 2u64)]))
+                .unwrap()
+                .keyword,
+            "Alice"
+        );
     }
 
     #[test]

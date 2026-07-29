@@ -16,6 +16,8 @@ pub struct MediaTagCleanupFile {
     pub path: String,
     pub file_name: String,
     pub size_bytes: u64,
+    #[serde(default)]
+    pub sha256: String,
     pub media_type: String,
     pub current_artist: Option<String>,
     pub target_artist: Option<String>,

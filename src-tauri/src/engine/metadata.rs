@@ -1,6 +1,7 @@
 use std::fs::{self, File};
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use exif::{In, Reader as ExifReader, Tag, Value};
 use lofty::config::{ParseOptions, WriteOptions};
@@ -11,11 +12,12 @@ use lofty::tag::{Accessor, ItemKey, Tag as LoftyTag};
 use lopdf::{Document, Object};
 use quick_xml::events::Event;
 use quick_xml::Reader;
+use regex::Regex;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use zip::ZipArchive;
 
-use crate::engine::executor;
+use crate::engine::{executor, hasher};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MediaType {
@@ -106,16 +108,24 @@ pub fn supports_tag_cleanup(path: &Path) -> bool {
 }
 
 /// 删除文件中的可写描述标签，保留封面，并写入统一的 Artist / AlbumArtist。
-pub fn clean_tags_and_set_artist(path: &Path, artist: &str) -> Result<(), String> {
+pub fn clean_tags_and_set_artist(
+    path: &Path,
+    backup: &Path,
+    artist: &str,
+    expected_hash: &str,
+) -> Result<(), String> {
     if !supports_tag_cleanup(path) {
         return Err("该格式暂不支持安全标签清洗".into());
     }
     let artist =
         normalize_author(artist.to_string()).ok_or_else(|| "作者名称不能为空".to_string())?;
-    let original_cover_hash = extract_tagged_media_all(path).cover_art_hash;
+    if expected_hash.is_empty() {
+        return Err("扫描时未能生成文件哈希，请重新扫描".into());
+    }
+    let original_cover_hash = extract_tagged_media_all(backup).cover_art_hash;
     let stage = sibling_work_path(path, "tag-stage")?;
     let rollback = sibling_work_path(path, "tag-rollback")?;
-    executor::safe_copy(path, &stage)?;
+    executor::safe_copy(backup, &stage)?;
 
     let write_result = rewrite_tags_in_place(&stage, &artist).and_then(|_| {
         let cleaned = extract_tagged_media_all(&stage);
@@ -132,6 +142,18 @@ pub fn clean_tags_and_set_artist(path: &Path, artist: &str) -> Result<(), String
     if let Err(error) = write_result {
         let _ = fs::remove_file(&stage);
         return Err(error);
+    }
+
+    let current_hash = match hasher::compute_sha256(path) {
+        Ok(hash) => hash,
+        Err(error) => {
+            let _ = fs::remove_file(&stage);
+            return Err(format!("验证待清洗文件 SHA-256 失败: {}", error));
+        }
+    };
+    if current_hash != expected_hash {
+        let _ = fs::remove_file(&stage);
+        return Err("文件在扫描后发生变化，已拒绝用旧备份执行标签清洗".into());
     }
 
     if let Err(error) = fs::rename(path, &rollback) {
@@ -302,15 +324,22 @@ fn hash_cover_art(data: &[u8]) -> String {
 
 fn split_contributing_artists(value: &str) -> Vec<String> {
     let mut artists = Vec::new();
-    for part in value.split(|ch| matches!(ch, ';' | '；' | '、' | '|')) {
-        let Some(artist) = normalize_author(part.to_string()) else {
-            continue;
-        };
-        if !artists
-            .iter()
-            .any(|existing: &String| existing.eq_ignore_ascii_case(&artist))
-        {
-            artists.push(artist);
+    static COLLABORATION_SEPARATOR: OnceLock<Regex> = OnceLock::new();
+    let collaboration_separator = COLLABORATION_SEPARATOR.get_or_init(|| {
+        Regex::new(r"(?i)\s+(?:feat(?:uring)?|ft)\.?\s+|\s+[/／]\s+")
+            .expect("参与艺术家分隔正则必须有效")
+    });
+    for segment in collaboration_separator.split(value) {
+        for part in segment.split([';', '；', '、', '|', '，', '\0', '\r', '\n']) {
+            let Some(artist) = normalize_author(part.to_string()) else {
+                continue;
+            };
+            if !artists
+                .iter()
+                .any(|existing: &String| existing.eq_ignore_ascii_case(&artist))
+            {
+                artists.push(artist);
+            }
         }
     }
     artists
@@ -511,6 +540,14 @@ mod tests {
         assert_eq!(
             split_contributing_artists(" 作者A；频道名、嘉宾B | 作者A "),
             vec!["作者A", "频道名", "嘉宾B"]
+        );
+    }
+
+    #[test]
+    fn splits_multivalue_and_collaboration_artist_formats() {
+        assert_eq!(
+            split_contributing_artists("作者A\0频道名 / 嘉宾B feat. 嘉宾C，组合D\r\n作者A"),
+            vec!["作者A", "频道名", "嘉宾B", "嘉宾C", "组合D"]
         );
     }
 
