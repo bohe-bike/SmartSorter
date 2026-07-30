@@ -47,6 +47,7 @@ const executionMessage = ref("");
 const progress = ref({ current: 0, total: 0, currentFile: "", phase: "" });
 // 用户对多关键字匹配文件的手动选择：文件路径 → 选定关键字
 const keywordAssignments = ref<Record<string, string>>({});
+const manualKeywordInputs = ref<Record<string, string>>({});
 // 分组折叠状态：存储已折叠的关键字
 const collapsedGroups = ref(new Set<string>());
 // 关键字分组搜索过滤词
@@ -73,6 +74,7 @@ function invalidateVerificationResult() {
   preview.value = null;
   executionMessage.value = "";
   keywordAssignments.value = {};
+  manualKeywordInputs.value = {};
 }
 
 const selectedMediaTypes = computed(() =>
@@ -91,11 +93,7 @@ const checkedPaths = computed(() => {
       .map((file) => file.path),
   );
   const unmatchedPaths = result.value.unmatched_files
-    .filter(
-      (file) =>
-        file.checked &&
-        (file.release_to_root || keywordAssignments.value[file.path]),
-    )
+    .filter((file) => unmatchedFileReady(file))
     .map((file) => file.path);
   return [...groupedPaths, ...unmatchedPaths];
 });
@@ -117,11 +115,7 @@ const totalSelectedSize = computed(() => {
     );
   }, 0);
   const unmatchedSize = result.value.unmatched_files
-    .filter(
-      (file) =>
-        file.checked &&
-        (file.release_to_root || keywordAssignments.value[file.path]),
-    )
+    .filter((file) => unmatchedFileReady(file))
     .reduce((sum, file) => sum + file.size_bytes, 0);
   return groupedSize + unmatchedSize;
 });
@@ -156,8 +150,28 @@ const allKeywords = computed(() => {
   return result.value.keywords.map((k) => k.keyword);
 });
 
-function selectableKeywords(file: MediaFile): string[] {
-  return file.matched_keywords.length > 0 ? file.matched_keywords : allKeywords.value;
+function updateManualKeyword(filePath: string, value: string) {
+  manualKeywordInputs.value[filePath] = value;
+  const normalized = value.trim().toLocaleLowerCase();
+  const keyword = allKeywords.value.find(
+    (item) => item.toLocaleLowerCase() === normalized,
+  );
+  assignKeyword(filePath, keyword ?? "");
+}
+
+function hasInvalidManualKeyword(filePath: string): boolean {
+  return Boolean(
+    manualKeywordInputs.value[filePath]?.trim() &&
+      !keywordAssignments.value[filePath],
+  );
+}
+
+function unmatchedFileReady(file: MediaFile): boolean {
+  if (!file.checked) return false;
+  if (keywordAssignments.value[file.path]) return true;
+  return Boolean(
+    file.release_to_root && !manualKeywordInputs.value[file.path]?.trim(),
+  );
 }
 
 // 合并信息
@@ -178,14 +192,20 @@ const filteredGroups = computed(() => {
 const remainingUnmatched = computed(() => {
   if (!result.value) return 0;
   return result.value.unmatched_files.filter(
-    (file) => !file.release_to_root && !keywordAssignments.value[file.path],
+    (file) =>
+      !keywordAssignments.value[file.path] &&
+      (!file.release_to_root || Boolean(manualKeywordInputs.value[file.path]?.trim())),
   ).length;
 });
 
 const releaseToRootCount = computed(() => {
   if (!result.value) return 0;
   return result.value.unmatched_files.filter(
-    (file) => file.release_to_root && file.checked,
+    (file) =>
+      file.release_to_root &&
+      file.checked &&
+      !keywordAssignments.value[file.path] &&
+      !manualKeywordInputs.value[file.path]?.trim(),
   ).length;
 });
 
@@ -239,6 +259,7 @@ async function generateKeywords() {
   preview.value = null;
   executionMessage.value = "";
   keywordAssignments.value = {};
+  manualKeywordInputs.value = {};
   collapsedGroups.value = new Set();
   keywordFilter.value = "";
   showKeywordEditor.value = false;
@@ -377,6 +398,7 @@ async function applyKeywordGroup() {
   preview.value = null;
   executionMessage.value = "";
   keywordAssignments.value = {};
+  manualKeywordInputs.value = {};
   collapsedGroups.value = new Set();
   keywordFilter.value = "";
   resetProgress("collecting");
@@ -403,6 +425,7 @@ function selectWorkflow(mode: "keywords" | "classify") {
   result.value = null;
   preview.value = null;
   keywordAssignments.value = {};
+  manualKeywordInputs.value = {};
 }
 
 async function loadSavedCreatorExclusions() {
@@ -420,6 +443,7 @@ async function saveCreatorExclusionList(keywords: string[]) {
     preview.value = null;
     result.value = null;
     keywordAssignments.value = {};
+    manualKeywordInputs.value = {};
   } catch (error) {
     alert("保存频道名称排除词失败: " + error);
   } finally {
@@ -887,6 +911,7 @@ function hasCoverEvidence(file: MediaFile): boolean {
             <span v-if="file.release_to_root" class="release-label">移到根目录</span>
           </span>
           <select
+            v-if="file.matched_keywords.length > 0"
             class="keyword-select"
             :value="keywordAssignments[file.path] || ''"
             :disabled="!file.checked"
@@ -898,12 +923,42 @@ function hasCoverEvidence(file: MediaFile): boolean {
             "
           >
             <option v-if="file.release_to_root" value="">移到扫描根目录</option>
-            <option v-else value="" disabled>请选择关键字</option>
-            <option v-for="kw in selectableKeywords(file)" :key="kw" :value="kw">
+            <option v-else value="" disabled>
+              请选择候选（{{ file.matched_keywords.length }}）
+            </option>
+            <option v-for="kw in file.matched_keywords" :key="kw" :value="kw">
               {{ kw }}
             </option>
           </select>
+          <input
+            v-else
+            class="keyword-search-input"
+            :class="{ invalid: hasInvalidManualKeyword(file.path) }"
+            type="search"
+            list="manual-keyword-options"
+            :value="manualKeywordInputs[file.path] || ''"
+            :disabled="!file.checked"
+            :placeholder="
+              file.release_to_root
+                ? '无候选；留空移到根目录'
+                : '无候选；搜索关键字'
+            "
+            :title="
+              hasInvalidManualKeyword(file.path)
+                ? '请输入并选择一个现有关键字'
+                : '输入文字可过滤现有关键字'
+            "
+            @input="
+              updateManualKeyword(
+                file.path,
+                ($event.target as HTMLInputElement).value,
+              )
+            "
+          />
         </div>
+        <datalist id="manual-keyword-options">
+          <option v-for="kw in allKeywords" :key="kw" :value="kw" />
+        </datalist>
       </div>
 
       <div class="action-panel">
@@ -1612,6 +1667,26 @@ function hasCoverEvidence(file: MediaFile): boolean {
   background: var(--color-bg);
   color: var(--color-text);
   min-width: 100px;
+}
+
+.keyword-search-input {
+  width: 210px;
+  height: 28px;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  padding: 0 8px;
+  font-size: 12px;
+  background: var(--color-bg);
+  color: var(--color-text);
+}
+
+.keyword-search-input.invalid {
+  border-color: var(--color-danger);
+}
+
+.keyword-search-input:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .file-row.multi-match {
