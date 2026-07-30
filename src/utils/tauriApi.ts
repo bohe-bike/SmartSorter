@@ -79,6 +79,7 @@ export async function scanMediaAuthors(
   mediaTypes: string[],
   keywordSources: string[],
   classificationDimension: ClassificationDimension,
+  verifyContentHash: boolean,
 ): Promise<MediaClassifyResult> {
   return invoke<MediaClassifyResult>("scan_media_authors", {
     paths,
@@ -86,6 +87,7 @@ export async function scanMediaAuthors(
     mediaTypes,
     keywordSources,
     classificationDimension,
+    verifyContentHash,
   });
 }
 
@@ -128,12 +130,14 @@ export async function applyMediaKeywordGroup(
   recursive: boolean,
   mediaTypes: string[],
   groupId: string,
+  verifyContentHash: boolean,
 ): Promise<MediaClassifyResult> {
   return invoke<MediaClassifyResult>("apply_media_keyword_group", {
     paths,
     recursive,
     mediaTypes,
     groupId,
+    verifyContentHash,
   });
 }
 
@@ -143,11 +147,13 @@ export async function scanMediaTagCleanup(
   paths: string[],
   recursive: boolean,
   authorFolderMode: AuthorFolderMode,
+  verifyContentHash: boolean,
 ): Promise<MediaTagCleanupResult> {
   return invoke<MediaTagCleanupResult>("scan_media_tag_cleanup", {
     paths,
     recursive,
     authorFolderMode,
+    verifyContentHash,
   });
 }
 

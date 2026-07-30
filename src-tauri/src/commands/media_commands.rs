@@ -90,6 +90,7 @@ pub async fn scan_media_authors(
     media_types: Vec<String>,
     keyword_sources: Vec<String>,
     classification_dimension: String,
+    verify_content_hash: bool,
 ) -> Result<MediaClassifyResult, String> {
     scan_media_with_keywords(
         app,
@@ -99,6 +100,7 @@ pub async fn scan_media_authors(
         keyword_sources,
         classification_dimension,
         None,
+        verify_content_hash,
     )
     .await
 }
@@ -111,6 +113,7 @@ async fn scan_media_with_keywords(
     keyword_sources: Vec<String>,
     classification_dimension: String,
     saved_keywords: Option<Vec<String>>,
+    verify_content_hash: bool,
 ) -> Result<MediaClassifyResult, String> {
     let task_id = Uuid::new_v4().to_string();
     let filters = normalize_media_filters(&media_types);
@@ -240,7 +243,11 @@ async fn scan_media_with_keywords(
                     },
                 );
                 let meta = metadata::extract_all_metadata(&path);
-                let sha256 = hasher::compute_sha256(&path).unwrap_or_default();
+                let sha256 = if verify_content_hash {
+                    hasher::compute_sha256(&path).unwrap_or_default()
+                } else {
+                    String::new()
+                };
                 files.push((path, size_bytes, meta, sha256));
             }
             files
@@ -452,7 +459,7 @@ async fn scan_media_with_keywords(
             .first()
             .map(|(_, candidate)| candidate.evidence.clone())
             .unwrap_or_default();
-        let snapshot_ready = !sha256.is_empty();
+        let snapshot_ready = !verify_content_hash || !sha256.is_empty();
         let release_to_root = direct_child_folder_name(path, &paths)
             .map(|folder| retired_folder_keys.contains(&normalize_match_text(&folder)))
             .unwrap_or(false);
@@ -461,7 +468,7 @@ async fn scan_media_with_keywords(
             .map(|(_, candidate)| candidate.score)
             .unwrap_or(0);
         let auto_classifiable = is_auto_classifiable(confidence, runner_up);
-        if !snapshot_ready {
+        if verify_content_hash && !snapshot_ready {
             evidence.push("无法生成文件内容快照，禁止执行归类".into());
         }
         if release_to_root && !auto_classifiable {
@@ -537,6 +544,7 @@ async fn scan_media_with_keywords(
         task_id,
         source_paths: paths.clone(),
         classification_dimension: dimension.as_str().to_string(),
+        verify_content_hash,
         scanned_count: total,
         total_keywords: groups.len() as u64,
         no_match_count,
@@ -624,6 +632,7 @@ pub async fn apply_media_keyword_group(
     recursive: bool,
     media_types: Vec<String>,
     group_id: String,
+    verify_content_hash: bool,
 ) -> Result<MediaClassifyResult, String> {
     let data_dir = app
         .path()
@@ -641,6 +650,7 @@ pub async fn apply_media_keyword_group(
         group.keyword_sources,
         group.classification_dimension,
         Some(group.keywords),
+        verify_content_hash,
     )
     .await
 }
@@ -676,7 +686,7 @@ pub fn preview_media_classify(
             if !selected.contains(file.path.as_str()) {
                 continue; // 用户未勾选，跳过
             }
-            if file.sha256.is_empty() {
+            if scan_result.verify_content_hash && file.sha256.is_empty() {
                 return Err(format!(
                     "文件 {} 缺少内容快照，请重新扫描后再生成预览",
                     file.path
@@ -712,6 +722,7 @@ pub fn preview_media_classify(
                 action_desc: format!("移动到 {} 并重命名", keyword),
                 size_bytes: file.size_bytes,
                 sha256: file.sha256.clone(),
+                verify_content_hash: scan_result.verify_content_hash,
             });
             if manually_assigned {
                 append_learning_hints(&mut learning_hints, file, &keyword);
@@ -724,7 +735,7 @@ pub fn preview_media_classify(
         if !selected.contains(file.path.as_str()) {
             continue;
         }
-        if file.sha256.is_empty() {
+        if scan_result.verify_content_hash && file.sha256.is_empty() {
             return Err(format!(
                 "文件 {} 缺少内容快照，请重新扫描后再生成预览",
                 file.path
@@ -774,6 +785,7 @@ pub fn preview_media_classify(
             action_desc,
             size_bytes: file.size_bytes,
             sha256: file.sha256.clone(),
+            verify_content_hash: scan_result.verify_content_hash,
         });
         if let Some(keyword) = assigned_keyword {
             append_learning_hints(&mut learning_hints, file, keyword);
@@ -847,8 +859,13 @@ pub async fn execute_media_classify(app: AppHandle, task_id: String) -> Result<S
             source_parents.insert(parent.to_path_buf());
         }
 
-        let result = validate_media_snapshot(source, item.size_bytes, &item.sha256)
-            .and_then(|_| executor::safe_move(source, target));
+        let result = validate_media_snapshot(
+            source,
+            item.size_bytes,
+            &item.sha256,
+            item.verify_content_hash,
+        )
+        .and_then(|_| executor::safe_move(source, target));
 
         let (status, error_message) = match &result {
             Ok(()) => {
@@ -1146,8 +1163,9 @@ fn validate_media_snapshot(
     path: &Path,
     expected_size: u64,
     expected_hash: &str,
+    verify_content_hash: bool,
 ) -> Result<(), String> {
-    if expected_hash.is_empty() {
+    if verify_content_hash && expected_hash.is_empty() {
         return Err("扫描时未能生成文件哈希，请重新扫描".into());
     }
     let actual_size = std::fs::metadata(path)
@@ -1159,10 +1177,12 @@ fn validate_media_snapshot(
             expected_size, actual_size
         ));
     }
-    let actual_hash = hasher::compute_sha256(path)
-        .map_err(|error| format!("验证源文件 SHA-256 失败: {}", error))?;
-    if actual_hash != expected_hash {
-        return Err("文件内容在扫描后发生变化，已拒绝执行旧归类计划".into());
+    if verify_content_hash {
+        let actual_hash = hasher::compute_sha256(path)
+            .map_err(|error| format!("验证源文件 SHA-256 失败: {}", error))?;
+        if actual_hash != expected_hash {
+            return Err("文件内容在扫描后发生变化，已拒绝执行旧归类计划".into());
+        }
     }
     Ok(())
 }
@@ -1596,10 +1616,11 @@ mod tests {
         let size = std::fs::metadata(&file).unwrap().len();
         let hash = hasher::compute_sha256(&file).unwrap();
 
-        assert!(validate_media_snapshot(&file, size, &hash).is_ok());
+        assert!(validate_media_snapshot(&file, size, &hash, true).is_ok());
         std::fs::write(&file, "modified").unwrap();
         assert_eq!(std::fs::metadata(&file).unwrap().len(), size);
-        assert!(validate_media_snapshot(&file, size, &hash).is_err());
+        assert!(validate_media_snapshot(&file, size, &hash, true).is_err());
+        assert!(validate_media_snapshot(&file, size, "", false).is_ok());
 
         std::fs::remove_dir_all(root).unwrap();
     }

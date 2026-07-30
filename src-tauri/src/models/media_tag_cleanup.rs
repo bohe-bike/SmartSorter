@@ -6,6 +6,8 @@ pub struct MediaTagCleanupResult {
     pub task_id: String,
     pub source_paths: Vec<String>,
     pub author_folder_mode: String,
+    #[serde(default)]
+    pub verify_content_hash: bool,
     pub scanned_count: u64,
     pub ready_count: u64,
     pub files: Vec<MediaTagCleanupFile>,

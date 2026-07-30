@@ -25,6 +25,7 @@ import type {
 
 const sourcePaths = ref<string[]>([]);
 const recursive = ref(false);
+const verifyContentHash = ref(false);
 const mediaTypeOptions = ref([
   { key: "image", label: "图片", checked: true },
   { key: "audio", label: "音频", checked: true },
@@ -66,6 +67,13 @@ const keywordSaveMessage = ref("");
 const keywordSaveState = ref<"success" | "error" | null>(null);
 
 let unlistenProgress: (() => void) | null = null;
+
+function invalidateVerificationResult() {
+  result.value = null;
+  preview.value = null;
+  executionMessage.value = "";
+  keywordAssignments.value = {};
+}
 
 const selectedMediaTypes = computed(() =>
   mediaTypeOptions.value.filter((item) => item.checked).map((item) => item.key),
@@ -244,6 +252,7 @@ async function generateKeywords() {
       selectedMediaTypes.value,
       allKeywordSources,
       "all",
+      verifyContentHash.value,
     );
     editableKeywords.value = generated.keywords.map((item) => item.keyword);
     keywordGroupName.value = "";
@@ -378,6 +387,7 @@ async function applyKeywordGroup() {
       recursive.value,
       selectedMediaTypes.value,
       selectedKeywordGroupId.value,
+      verifyContentHash.value,
     );
   } catch (error) {
     alert("应用关键词组失败: " + error);
@@ -615,6 +625,20 @@ function hasCoverEvidence(file: MediaFile): boolean {
         >
           <input v-model="item.checked" type="checkbox" /> {{ item.label }}
         </label>
+      </div>
+
+      <div class="filter-row">
+        <span class="filter-label">内容校验</span>
+        <div class="verification-switch">
+          <label :class="{ active: !verifyContentHash }">
+            <input v-model="verifyContentHash" type="radio" :value="false" @change="invalidateVerificationResult" />
+            快速：路径 + 大小
+          </label>
+          <label :class="{ active: verifyContentHash }">
+            <input v-model="verifyContentHash" type="radio" :value="true" @change="invalidateVerificationResult" />
+            严格：SHA-256
+          </label>
+        </div>
       </div>
 
       <div
@@ -1204,6 +1228,38 @@ function hasCoverEvidence(file: MediaFile): boolean {
   border-color: var(--color-primary);
   background: var(--color-active);
   color: var(--color-primary);
+}
+
+.verification-switch {
+  display: flex;
+  min-height: 30px;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.verification-switch label {
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  padding: 0 10px;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+}
+
+.verification-switch label + label {
+  border-left: 1px solid var(--color-border);
+}
+
+.verification-switch label.active {
+  background: var(--color-active);
+  color: var(--color-primary);
+}
+
+.verification-switch input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
 }
 
 .keyword-editor-section {

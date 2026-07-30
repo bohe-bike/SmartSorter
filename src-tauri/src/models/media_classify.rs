@@ -42,6 +42,8 @@ pub struct MediaClassifyResult {
     pub task_id: String,
     pub source_paths: Vec<String>,
     pub classification_dimension: String,
+    #[serde(default)]
+    pub verify_content_hash: bool,
     pub scanned_count: u64,
     pub total_keywords: u64,
     pub no_match_count: u64,
@@ -99,6 +101,8 @@ pub struct ClassifyPreviewItem {
     pub size_bytes: u64,
     #[serde(default)]
     pub sha256: String,
+    #[serde(default)]
+    pub verify_content_hash: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

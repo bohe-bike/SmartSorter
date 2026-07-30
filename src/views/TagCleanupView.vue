@@ -17,6 +17,7 @@ import type {
 const sourcePaths = ref<string[]>([]);
 const recursive = ref(true);
 const authorFolderMode = ref<AuthorFolderMode | null>(null);
+const verifyContentHash = ref(false);
 const scanning = ref(false);
 const executing = ref(false);
 const result = ref<MediaTagCleanupResult | null>(null);
@@ -49,6 +50,10 @@ const authorFolderModeLabel = computed(() =>
     : authorFolderMode.value === "selected"
       ? "所选目录本身就是作者文件夹"
       : "尚未选择作者目录层级",
+);
+
+const verificationModeLabel = computed(() =>
+  verifyContentHash.value ? "严格 SHA-256" : "快速路径与大小校验",
 );
 
 async function addFolder() {
@@ -108,6 +113,7 @@ async function scanFiles() {
       sourcePaths.value,
       recursive.value,
       folderMode,
+      verifyContentHash.value,
     );
   } catch (error) {
     message.value = "扫描失败: " + String(error);
@@ -142,7 +148,7 @@ async function executeCleanup() {
   if (!result.value || selectedFiles.value.length === 0 || executing.value) return;
   if (
     !confirm(
-      `目录模式：${authorFolderModeLabel.value}\n\n将清洗 ${selectedFiles.value.length} 个文件，并写入 Artist 和 AlbumArtist。系统会先创建完整原文件备份，完成后可在历史记录中撤销；备份会占用额外磁盘空间。是否继续？`,
+      `目录模式：${authorFolderModeLabel.value}\n内容校验：${verificationModeLabel.value}\n\n将清洗 ${selectedFiles.value.length} 个文件，并写入 Artist 和 AlbumArtist。系统会先创建完整原文件备份，完成后可在历史记录中撤销；备份会占用额外磁盘空间。是否继续？`,
     )
   ) {
     return;
@@ -217,6 +223,19 @@ onUnmounted(cleanupProgress);
           <label :class="{ active: authorFolderMode === 'selected' }">
             <input v-model="authorFolderMode" type="radio" value="selected" @change="invalidateScanResult" />
             所选目录是作者
+          </label>
+        </div>
+      </div>
+      <div class="folder-mode-row">
+        <span class="label">内容校验</span>
+        <div class="folder-mode-control">
+          <label :class="{ active: !verifyContentHash }">
+            <input v-model="verifyContentHash" type="radio" :value="false" @change="invalidateScanResult" />
+            快速：路径 + 大小
+          </label>
+          <label :class="{ active: verifyContentHash }">
+            <input v-model="verifyContentHash" type="radio" :value="true" @change="invalidateScanResult" />
+            严格：SHA-256
           </label>
         </div>
       </div>

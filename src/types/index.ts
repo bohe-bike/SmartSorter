@@ -230,6 +230,7 @@ export interface DuplicateFile {
 export interface MediaClassifyResult {
   task_id: string;
   classification_dimension: ClassificationDimension;
+  verify_content_hash: boolean;
   scanned_count: number;
   total_keywords: number;
   no_match_count: number;
@@ -299,6 +300,7 @@ export interface ClassifyPreviewItem {
   action_desc: string;
   size_bytes: number;
   sha256: string;
+  verify_content_hash: boolean;
 }
 
 export interface ClassifyPreviewResult {
@@ -315,6 +317,7 @@ export interface MediaTagCleanupResult {
   task_id: string;
   source_paths: string[];
   author_folder_mode: AuthorFolderMode;
+  verify_content_hash: boolean;
   scanned_count: number;
   ready_count: number;
   files: MediaTagCleanupFile[];

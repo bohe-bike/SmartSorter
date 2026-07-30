@@ -23,6 +23,7 @@ pub async fn scan_media_tag_cleanup(
     paths: Vec<String>,
     recursive: bool,
     author_folder_mode: String,
+    verify_content_hash: bool,
 ) -> Result<MediaTagCleanupResult, String> {
     if paths.is_empty() {
         return Err("请至少选择一个扫描目录".into());
@@ -124,14 +125,14 @@ pub async fn scan_media_tag_cleanup(
                 author_folder_mode,
             );
             let supported = metadata::supports_tag_cleanup(&path);
-            let sha256 = if supported {
+            let sha256 = if supported && verify_content_hash {
                 hasher::compute_sha256(&path).unwrap_or_default()
             } else {
                 String::new()
             };
             let skip_reason = if !supported {
                 Some("该格式暂不支持安全标签清洗".to_string())
-            } else if sha256.is_empty() {
+            } else if verify_content_hash && sha256.is_empty() {
                 Some("无法生成文件内容快照，请检查文件是否可读取".to_string())
             } else if target_artist.is_none() {
                 Some("未找到一级作者目录，且文件没有可用的 Artist 标签".to_string())
@@ -154,7 +155,9 @@ pub async fn scan_media_tag_cleanup(
                 author_source,
                 supported,
                 skip_reason,
-                checked: supported && target_artist.is_some() && !sha256.is_empty(),
+                checked: supported
+                    && target_artist.is_some()
+                    && (!verify_content_hash || !sha256.is_empty()),
             });
         }
         files
@@ -167,6 +170,7 @@ pub async fn scan_media_tag_cleanup(
         task_id,
         source_paths: paths,
         author_folder_mode: author_folder_mode.as_str().into(),
+        verify_content_hash,
         scanned_count: total,
         ready_count,
         files,
@@ -219,6 +223,7 @@ pub async fn execute_media_tag_cleanup(
         .map_err(|error| error.to_string())?;
     let task_id = request.task_id.clone();
     let assignments = request.author_assignments;
+    let verify_content_hash = scan_result.verify_content_hash;
     let app_for_execute = app.clone();
     let (succeeded, failed, skipped, _operations) =
         tauri::async_runtime::spawn_blocking(move || {
@@ -261,17 +266,26 @@ pub async fn execute_media_tag_cleanup(
                     )
                 } else if let Some(artist) = target_artist {
                     let media_path = Path::new(&file.path);
-                    if file.sha256.is_empty() {
+                    if verify_content_hash && file.sha256.is_empty() {
                         failed += 1;
                         (
                             OperationStatus::Failed,
                             Some("文件缺少内容快照，请重新扫描后再执行标签清洗".into()),
                             artist.to_string(),
                         )
+                    } else if let Err(error) =
+                        validate_tag_cleanup_size_snapshot(media_path, file.size_bytes)
+                    {
+                        failed += 1;
+                        (
+                            OperationStatus::Failed,
+                            Some(error),
+                            artist.to_string(),
+                        )
                     } else {
                         match create_tag_backup(&data_dir, &task_id, media_path) {
                         Ok((created_backup, created_hash)) => {
-                            if created_hash != file.sha256 {
+                            if verify_content_hash && created_hash != file.sha256 {
                                 let _ = fs::remove_file(&created_backup);
                                 if let Some(parent) = created_backup.parent() {
                                     let _ = fs::remove_dir(parent);
@@ -287,12 +301,17 @@ pub async fn execute_media_tag_cleanup(
                                 )
                             } else {
                                 backup_path = Some(created_backup.to_string_lossy().into_owned());
-                                backup_hash = Some(created_hash);
+                                backup_hash = Some(created_hash.clone());
+                                let expected_execution_hash = if verify_content_hash {
+                                    file.sha256.as_str()
+                                } else {
+                                    created_hash.as_str()
+                                };
                                 match metadata::clean_tags_and_set_artist(
                                     media_path,
                                     &created_backup,
                                     artist,
-                                    &file.sha256,
+                                    expected_execution_hash,
                                 ) {
                                     Ok(()) => match hasher::compute_sha256(media_path) {
                                         Ok(cleaned_hash) => {
@@ -528,6 +547,19 @@ fn normalize_author_key(value: &str) -> String {
         .collect()
 }
 
+fn validate_tag_cleanup_size_snapshot(path: &Path, expected_size: u64) -> Result<(), String> {
+    let actual_size = fs::metadata(path)
+        .map_err(|error| format!("读取待清洗文件失败: {}", error))?
+        .len();
+    if actual_size != expected_size {
+        return Err(format!(
+            "文件大小在扫描后发生变化（扫描时 {} 字节，当前 {} 字节），请重新扫描",
+            expected_size, actual_size
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(target_os = "windows")]
 fn path_is_within(path: &Path, root: &Path) -> bool {
     let path = path.to_string_lossy().replace('/', "\\").to_lowercase();
@@ -571,6 +603,21 @@ mod tests {
         );
         assert_eq!(backup_hash, source_hash);
         assert_eq!(std::fs::read(&backup).unwrap(), b"media bytes");
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn fast_tag_cleanup_snapshot_checks_size_without_requiring_hash() {
+        let root = std::env::temp_dir().join(format!("smart-sorter-tag-size-{}", Uuid::new_v4()));
+        let source = root.join("track.mp3");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&source, "media bytes").unwrap();
+        let size = std::fs::metadata(&source).unwrap().len();
+
+        assert!(validate_tag_cleanup_size_snapshot(&source, size).is_ok());
+        std::fs::write(&source, "different media bytes").unwrap();
+        assert!(validate_tag_cleanup_size_snapshot(&source, size).is_err());
 
         std::fs::remove_dir_all(root).unwrap();
     }
