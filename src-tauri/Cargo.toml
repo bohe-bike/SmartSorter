@@ -1,6 +1,6 @@
 [package]
 name = "smart-sorter"
-version = "2.0.0"
+version = "2.1.0"
 description = "SmartSorter - 桌面端文件智能整理工具"
 authors = ["you"]
 edition = "2021"
