@@ -404,13 +404,15 @@ async function applyKeywordGroup() {
   resetProgress("collecting");
   try {
     await prepareProgressListener();
-    result.value = await applyMediaKeywordGroup(
+    const classifyResult = await applyMediaKeywordGroup(
       sourcePaths.value,
       recursive.value,
       selectedMediaTypes.value,
       selectedKeywordGroupId.value,
       verifyContentHash.value,
     );
+    result.value = classifyResult;
+    assignSingleMatchDefaults(classifyResult);
   } catch (error) {
     alert("应用关键词组失败: " + error);
   } finally {
@@ -483,6 +485,19 @@ function assignKeyword(filePath: string, keyword: string) {
     keywordAssignments.value[filePath] = keyword;
   } else {
     delete keywordAssignments.value[filePath];
+  }
+}
+
+function assignSingleMatchDefaults(classifyResult: MediaClassifyResult) {
+  const files = [
+    ...classifyResult.groups.flatMap((group) => group.files),
+    ...classifyResult.unmatched_files,
+  ];
+
+  for (const file of files) {
+    if (file.matched_keywords.length === 1) {
+      assignKeyword(file.path, file.matched_keywords[0]);
+    }
   }
 }
 

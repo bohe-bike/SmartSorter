@@ -274,20 +274,16 @@ fn extract_tagged_media_all(path: &Path) -> MediaMetadata {
                 .filter(|picture| !picture.data().is_empty())
                 .map(|picture| hash_cover_art(picture.data()));
         }
-        if meta.contributing_artists.is_empty() {
-            let contributing_artists = tag
-                .artist()
-                .map(|text| text.into_owned())
-                .or_else(|| {
-                    tag.get_string(&lofty::tag::ItemKey::TrackArtist)
-                        .map(str::to_owned)
-                })
-                .map(|text| split_contributing_artists(&text))
-                .unwrap_or_default();
-            if let Some(primary_artist) = contributing_artists.first() {
-                meta.artist = Some(primary_artist.clone());
-                meta.contributing_artists = contributing_artists;
-            }
+        // A container can expose artists through multiple tag blocks. Collect every
+        // readable Artist value before splitting so later blocks are not ignored.
+        for artist_text in [
+            tag.artist().map(|text| text.into_owned()),
+            tag.get_string(&ItemKey::TrackArtist).map(str::to_owned),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            append_contributing_artists(&mut meta.contributing_artists, &artist_text);
         }
         if meta.album_artist.is_none() {
             if let Some(text) = tag.get_string(&lofty::tag::ItemKey::AlbumArtist) {
@@ -314,6 +310,8 @@ fn extract_tagged_media_all(path: &Path) -> MediaMetadata {
             }
         }
     }
+
+    meta.artist = meta.contributing_artists.first().cloned();
 
     meta
 }
@@ -343,6 +341,17 @@ fn split_contributing_artists(value: &str) -> Vec<String> {
         }
     }
     artists
+}
+
+fn append_contributing_artists(artists: &mut Vec<String>, value: &str) {
+    for artist in split_contributing_artists(value) {
+        if !artists
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(&artist))
+        {
+            artists.push(artist);
+        }
+    }
 }
 
 fn extract_ebook_author(path: &Path) -> Option<String> {
@@ -548,6 +557,14 @@ mod tests {
         assert_eq!(
             split_contributing_artists("作者A\0频道名 / 嘉宾B feat. 嘉宾C，组合D\r\n作者A"),
             vec!["作者A", "频道名", "嘉宾B", "嘉宾C", "组合D"]
+        );
+    }
+
+    #[test]
+    fn splits_windows_contributing_artists_value() {
+        assert_eq!(
+            split_contributing_artists("黧落大总攻; TG@Jingluoasmr;"),
+            vec!["黧落大总攻", "TG@Jingluoasmr"]
         );
     }
 
