@@ -40,3 +40,5 @@ Desktop.ini
 # Tauri build artifacts
 src-tauri/gen/
 src-tauri/WixTools/
+
+.pnpm-store/
