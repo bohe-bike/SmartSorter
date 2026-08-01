@@ -256,64 +256,144 @@ fn extract_image_author(path: &Path) -> Option<String> {
 
 /// 提取音频/视频文件的所有元数据字段
 fn extract_tagged_media_all(path: &Path) -> MediaMetadata {
-    let tagged = match Probe::open(path)
+    let tagged = Probe::open(path)
         .ok()
-        .and_then(|p| p.options(ParseOptions::new()).read().ok())
-    {
-        Some(t) => t,
-        None => return MediaMetadata::default(),
-    };
+        .and_then(|probe| probe.options(ParseOptions::new()).guess_file_type().ok())
+        .and_then(|probe| probe.read().ok());
 
     let mut meta = MediaMetadata::default();
 
-    for tag in tagged.tags() {
-        if meta.cover_art_hash.is_none() {
-            meta.cover_art_hash = tag
-                .get_picture_type(PictureType::CoverFront)
-                .or_else(|| tag.pictures().first())
-                .filter(|picture| !picture.data().is_empty())
-                .map(|picture| hash_cover_art(picture.data()));
-        }
-        // A container can expose artists through multiple tag blocks. Collect every
-        // readable Artist value before splitting so later blocks are not ignored.
-        for artist_text in [
-            tag.artist().map(|text| text.into_owned()),
-            tag.get_string(&ItemKey::TrackArtist).map(str::to_owned),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            append_contributing_artists(&mut meta.contributing_artists, &artist_text);
-        }
-        if meta.album_artist.is_none() {
-            if let Some(text) = tag.get_string(&lofty::tag::ItemKey::AlbumArtist) {
-                let s = text.to_string();
-                if !s.trim().is_empty() {
-                    meta.album_artist = normalize_author(s);
+    if let Some(tagged) = tagged {
+        for tag in tagged.tags() {
+            if meta.cover_art_hash.is_none() {
+                meta.cover_art_hash = tag
+                    .get_picture_type(PictureType::CoverFront)
+                    .or_else(|| tag.pictures().first())
+                    .filter(|picture| !picture.data().is_empty())
+                    .map(|picture| hash_cover_art(picture.data()));
+            }
+            append_tag_artists(&mut meta.contributing_artists, tag);
+            if meta.album_artist.is_none() {
+                if let Some(text) = tag.get_strings(&ItemKey::AlbumArtist).next() {
+                    let s = text.to_string();
+                    if !s.trim().is_empty() {
+                        meta.album_artist = normalize_author(s);
+                    }
                 }
             }
-        }
-        if meta.album.is_none() {
-            if let Some(text) = tag.album() {
-                let s = text.to_string();
-                if !s.trim().is_empty() {
-                    meta.album = normalize_author(s);
+            if meta.album.is_none() {
+                if let Some(text) = tag.album() {
+                    let s = text.to_string();
+                    if !s.trim().is_empty() {
+                        meta.album = normalize_author(s);
+                    }
                 }
             }
-        }
-        if meta.composer.is_none() {
-            if let Some(text) = tag.get_string(&lofty::tag::ItemKey::Composer) {
-                let s = text.to_string();
-                if !s.trim().is_empty() {
-                    meta.composer = normalize_author(s);
+            if meta.composer.is_none() {
+                if let Some(text) = tag.get_strings(&ItemKey::Composer).next() {
+                    let s = text.to_string();
+                    if !s.trim().is_empty() {
+                        meta.composer = normalize_author(s);
+                    }
                 }
             }
         }
     }
 
+    if needs_windows_shell_artist_fallback(&meta.contributing_artists) {
+        append_windows_shell_artists(path, &mut meta.contributing_artists);
+    }
+
     meta.artist = meta.contributing_artists.first().cloned();
 
     meta
+}
+
+fn append_tag_artists(artists: &mut Vec<String>, tag: &LoftyTag) {
+    for artist_text in tag.get_strings(&ItemKey::TrackArtist) {
+        append_contributing_artists(artists, artist_text);
+    }
+}
+
+fn needs_windows_shell_artist_fallback(artists: &[String]) -> bool {
+    artists.is_empty()
+        || (artists.len() == 1
+            && artists[0]
+                .chars()
+                .any(|character| matches!(character, '/' | '／')))
+}
+
+#[cfg(target_os = "windows")]
+fn append_windows_shell_artists(path: &Path, artists: &mut Vec<String>) {
+    if let Ok(values) = read_windows_shell_artists(path) {
+        let mut shell_artists = Vec::new();
+        for value in values {
+            append_contributing_artists(&mut shell_artists, &value);
+        }
+        if artists.is_empty() || shell_artists.len() > artists.len() {
+            *artists = shell_artists;
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn append_windows_shell_artists(_path: &Path, _artists: &mut Vec<String>) {}
+
+#[cfg(target_os = "windows")]
+fn read_windows_shell_artists(path: &Path) -> Result<Vec<String>, String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::EnhancedStorage::PKEY_Music_Artist;
+    use windows::Win32::System::Com::StructuredStorage::{
+        PropVariantClear, PropVariantGetElementCount, PropVariantGetStringElem,
+    };
+    use windows::Win32::System::Com::{
+        CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_MULTITHREADED,
+    };
+    use windows::Win32::UI::Shell::PropertiesSystem::{
+        IPropertyStore, SHGetPropertyStoreFromParsingName, GPS_DEFAULT,
+    };
+
+    struct ComInitialization(bool);
+    impl Drop for ComInitialization {
+        fn drop(&mut self) {
+            if self.0 {
+                unsafe { CoUninitialize() };
+            }
+        }
+    }
+
+    let initialized = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED).is_ok() };
+    let _com = ComInitialization(initialized);
+    let wide_path = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let store: IPropertyStore =
+        unsafe { SHGetPropertyStoreFromParsingName(PCWSTR(wide_path.as_ptr()), None, GPS_DEFAULT) }
+            .map_err(|error| format!("读取 Windows 媒体属性失败: {}", error))?;
+    let mut property = unsafe { store.GetValue(&PKEY_Music_Artist) }
+        .map_err(|error| format!("读取参与创作的艺术家失败: {}", error))?;
+
+    let result = (|| {
+        let count = unsafe { PropVariantGetElementCount(&property) };
+        let mut values = Vec::new();
+        for index in 0..count {
+            let raw = unsafe { PropVariantGetStringElem(&property, index) }
+                .map_err(|error| format!("转换参与创作的艺术家失败: {}", error))?;
+            let value = unsafe { raw.to_string() }
+                .map_err(|error| format!("转换参与创作的艺术家文本失败: {}", error));
+            unsafe { CoTaskMemFree(Some(raw.0.cast())) };
+            let value = value?;
+            if !value.trim().is_empty() {
+                values.push(value);
+            }
+        }
+        Ok(values)
+    })();
+    let _ = unsafe { PropVariantClear(&mut property) };
+    result
 }
 
 fn hash_cover_art(data: &[u8]) -> String {
@@ -566,6 +646,37 @@ mod tests {
             split_contributing_artists("黧落大总攻; TG@Jingluoasmr;"),
             vec!["黧落大总攻", "TG@Jingluoasmr"]
         );
+    }
+
+    #[test]
+    fn collects_every_track_artist_item() {
+        use lofty::tag::{ItemValue, TagItem, TagType};
+
+        let mut tag = LoftyTag::new(TagType::Id3v2);
+        assert!(tag.push(TagItem::new(
+            ItemKey::TrackArtist,
+            ItemValue::Text("作者A".into()),
+        )));
+        assert!(tag.push(TagItem::new(
+            ItemKey::TrackArtist,
+            ItemValue::Text("频道名".into()),
+        )));
+        let mut artists = Vec::new();
+
+        append_tag_artists(&mut artists, &tag);
+
+        assert_eq!(artists, vec!["作者A", "频道名"]);
+    }
+
+    #[test]
+    fn requests_shell_fallback_for_empty_or_ambiguous_artist_values() {
+        assert!(needs_windows_shell_artist_fallback(&[]));
+        assert!(needs_windows_shell_artist_fallback(&["作者A/作者B".into()]));
+        assert!(!needs_windows_shell_artist_fallback(&["ACDC".into()]));
+        assert!(!needs_windows_shell_artist_fallback(&[
+            "作者A".into(),
+            "作者B".into(),
+        ]));
     }
 
     #[test]
