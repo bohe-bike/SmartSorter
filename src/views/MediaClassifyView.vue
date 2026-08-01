@@ -495,8 +495,11 @@ function assignSingleMatchDefaults(classifyResult: MediaClassifyResult) {
   ];
 
   for (const file of files) {
-    if (file.matched_keywords.length === 1) {
+    const snapshotReady =
+      !classifyResult.verify_content_hash || Boolean(file.sha256);
+    if (file.matched_keywords.length === 1 && snapshotReady) {
       assignKeyword(file.path, file.matched_keywords[0]);
+      file.checked = true;
     }
   }
 }
