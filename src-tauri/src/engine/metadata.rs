@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use exif::{In, Reader as ExifReader, Tag, Value};
+use id3::{Tag as Id3Tag, TagLike};
 use lofty::config::{ParseOptions, WriteOptions};
 use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::picture::PictureType;
@@ -300,6 +301,10 @@ fn extract_tagged_media_all(path: &Path) -> MediaMetadata {
         }
     }
 
+    if needs_mp3_id3_fallback(path, &meta) {
+        append_mp3_id3_fallback(path, &mut meta);
+    }
+
     if needs_windows_shell_artist_fallback(&meta.contributing_artists) {
         append_windows_shell_artists(path, &mut meta.contributing_artists);
     }
@@ -312,6 +317,29 @@ fn extract_tagged_media_all(path: &Path) -> MediaMetadata {
 fn append_tag_artists(artists: &mut Vec<String>, tag: &LoftyTag) {
     for artist_text in tag.get_strings(&ItemKey::TrackArtist) {
         append_contributing_artists(artists, artist_text);
+    }
+}
+
+/// Lofty 会因部分无关的损坏 ID3 帧（例如非法时间戳）拒绝整个文件。
+/// 归类只需要文本创作者字段时，对 MP3 再用宽容的 `id3` 读取器回退。
+fn needs_mp3_id3_fallback(path: &Path, meta: &MediaMetadata) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("mp3"))
+        && (meta.contributing_artists.is_empty() || meta.album_artist.is_none())
+}
+
+fn append_mp3_id3_fallback(path: &Path, meta: &mut MediaMetadata) {
+    let Ok(tag) = Id3Tag::read_from_path(path) else {
+        return;
+    };
+    if let Some(artist) = tag.artist() {
+        append_contributing_artists(&mut meta.contributing_artists, artist);
+    }
+    if meta.album_artist.is_none() {
+        meta.album_artist = tag
+            .album_artist()
+            .and_then(|artist| normalize_author(artist.to_string()));
     }
 }
 
@@ -404,7 +432,7 @@ fn split_contributing_artists(value: &str) -> Vec<String> {
     let mut artists = Vec::new();
     static COLLABORATION_SEPARATOR: OnceLock<Regex> = OnceLock::new();
     let collaboration_separator = COLLABORATION_SEPARATOR.get_or_init(|| {
-        Regex::new(r"(?i)\s+(?:feat(?:uring)?|ft)\.?\s+|\s+[/／]\s+")
+        Regex::new(r"(?i)\s+(?:feat(?:uring)?|ft)\.?\s+|\s*[/／]\s*")
             .expect("参与艺术家分隔正则必须有效")
     });
     for segment in collaboration_separator.split(value) {
@@ -637,6 +665,14 @@ mod tests {
         assert_eq!(
             split_contributing_artists("作者A\0频道名 / 嘉宾B feat. 嘉宾C，组合D\r\n作者A"),
             vec!["作者A", "频道名", "嘉宾B", "嘉宾C", "组合D"]
+        );
+    }
+
+    #[test]
+    fn splits_artist_slash_without_surrounding_whitespace() {
+        assert_eq!(
+            split_contributing_artists("作者A/TG@channel／嘉宾B"),
+            vec!["作者A", "TG@channel", "嘉宾B"]
         );
     }
 

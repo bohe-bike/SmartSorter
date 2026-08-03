@@ -1,6 +1,6 @@
 [package]
 name = "smart-sorter"
-version = "2.2.0"
+version = "2.2.1"
 description = "SmartSorter - 桌面端文件智能整理工具"
 authors = ["you"]
 edition = "2021"
@@ -31,6 +31,7 @@ uuid = { version = "1", features = ["v4"] }
 rfd = "0.15"
 tauri-plugin-updater = "2"
 lofty = "0.21"
+id3 = "1"
 kamadak-exif = "0.6"
 lopdf = "0.35"
 quick-xml = "0.37"

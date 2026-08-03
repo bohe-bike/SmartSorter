@@ -8,8 +8,9 @@
   默认执行步骤（推荐，CI 构建）：
   1. 更新 package.json、Cargo.toml、tauri.conf.json 中的版本号
   2. git add + commit
-  3. 创建 git tag (v1.1.0；如本地已存在则删除后重建)
-  4. 可选推送到远程（如远程已存在同名 tag 则删除后重新推送，GitHub Actions 会自动创建 Release 并上传产物）
+  3. 校验三个版本文件与目标版本一致，再创建 git tag
+  4. 校验 tag 指向刚创建的提交且 tag 内版本一致
+  5. 可选推送到远程（禁止覆盖已有 tag，GitHub Actions 会创建 Release 并上传产物）
 
   可选步骤：
   - 使用 -LocalBuild 时，本地先执行前端构建和 Tauri 打包，用于发布前自检。
@@ -82,6 +83,42 @@ if (-not $remoteName) {
     exit 1
 }
 
+function Get-CargoPackageVersion([string]$Content) {
+    $match = [regex]::Match($Content, '(?m)^version\s*=\s*"([^"]+)"')
+    if (-not $match.Success) {
+        throw "无法从 Cargo.toml 读取 package version"
+    }
+    return $match.Groups[1].Value
+}
+
+function Assert-VersionMatches([string]$Stage, [string]$ExpectedVersion, [string]$PackageVersion, [string]$CargoVersion, [string]$TauriVersion) {
+    if ($PackageVersion -ne $ExpectedVersion -or $CargoVersion -ne $ExpectedVersion -or $TauriVersion -ne $ExpectedVersion) {
+        throw "$Stage 版本不一致：package.json=$PackageVersion, Cargo.toml=$CargoVersion, tauri.conf.json=$TauriVersion, 目标=$ExpectedVersion"
+    }
+}
+
+Push-Location $root
+$existingTag = git rev-parse -q --verify "refs/tags/$tagName" 2>$null
+if ($LASTEXITCODE -eq 0 -and $existingTag) {
+    Pop-Location
+    Write-Error "本地 tag $tagName 已存在。发布 tag 不可覆盖，请使用新版本号。"
+    exit 1
+}
+if ($Push) {
+    git ls-remote --exit-code --tags $remoteName "refs/tags/$tagName" *> $null
+    if ($LASTEXITCODE -eq 0) {
+        Pop-Location
+        Write-Error "远程 tag $tagName 已存在。发布 tag 不可覆盖，请使用新版本号。"
+        exit 1
+    }
+    if ($LASTEXITCODE -ne 2) {
+        Pop-Location
+        Write-Error "检查远程 tag $tagName 失败"
+        exit 1
+    }
+}
+Pop-Location
+
 Write-Host "=== SmartSorter Release $tagName ===" -ForegroundColor Cyan
 Write-Host "项目根目录: $root"
 Write-Host "Git 远程仓库: $remoteName"
@@ -106,6 +143,13 @@ $tauriPath = Join-Path $root "src-tauri\tauri.conf.json"
 $tauri = Get-Content $tauriPath -Raw
 $tauri = $tauri -replace '"version"\s*:\s*"[^"]*"', "`"version`": `"$Version`""
 Set-Content -Path $tauriPath -Value $tauri -NoNewline -Encoding UTF8
+
+# 三个版本文件必须在构建前同步；否则 Tauri 产物名会和 Git tag 脱节。
+$packageVersion = ((Get-Content $pkgPath -Raw) | ConvertFrom-Json).version
+$cargoVersion = Get-CargoPackageVersion (Get-Content $cargoPath -Raw)
+$tauriVersion = ((Get-Content $tauriPath -Raw) | ConvertFrom-Json).version
+Assert-VersionMatches "写入后" $Version $packageVersion $cargoVersion $tauriVersion
+Write-Host "版本校验通过：$Version" -ForegroundColor Green
 
 # ---- 4. 可选本地编译 ----
 if ($LocalBuild) {
@@ -166,19 +210,42 @@ if ($LocalBuild) {
 # ---- 5. Git commit ----
 Write-Host "`n[6/7] Git commit ..." -ForegroundColor Yellow
 Push-Location $root
-git add package.json src-tauri/Cargo.toml src-tauri/tauri.conf.json CHANGELOG.md
+git add -- package.json src-tauri/Cargo.toml src-tauri/tauri.conf.json
+if (Test-Path "CHANGELOG.md") {
+    git add -- CHANGELOG.md
+}
+git diff --cached --quiet
+if ($LASTEXITCODE -eq 0) {
+    Pop-Location
+    Write-Error "没有待提交的发布版本变更，已拒绝创建 $tagName。请勿在未提交版本文件的提交上打发布 tag。"
+    exit 1
+}
 git commit -m $Message
+if ($LASTEXITCODE -ne 0) {
+    Pop-Location
+    Write-Error "创建发布 commit 失败"
+    exit 1
+}
+$releaseCommit = (git rev-parse HEAD).Trim()
 
 # ---- 6. Git tag ----
 Write-Host "[7/7] 创建 Git Tag $tagName ..." -ForegroundColor Yellow
-$existingTag = git tag --list $tagName
-if ($existingTag) {
-    Write-Host "本地 tag $tagName 已存在，先删除后重新创建 ..." -ForegroundColor Yellow
-    git tag -d $tagName
-    if ($LASTEXITCODE -ne 0) { Write-Error "删除本地 tag $tagName 失败"; exit 1 }
+git tag -a $tagName $releaseCommit -m $Message
+if ($LASTEXITCODE -ne 0) {
+    Pop-Location
+    Write-Error "创建 Git Tag $tagName 失败"
+    exit 1
 }
-git tag -a $tagName -m $Message
-if ($LASTEXITCODE -ne 0) { Write-Error "创建 Git Tag $tagName 失败"; exit 1 }
+$tagCommit = (git rev-list -n 1 $tagName).Trim()
+if ($tagCommit -ne $releaseCommit) {
+    Pop-Location
+    Write-Error "Tag $tagName 指向 $tagCommit，而不是本次发布提交 $releaseCommit"
+    exit 1
+}
+$taggedPackageVersion = ((git show ("{0}:package.json" -f $tagName) | Out-String) | ConvertFrom-Json).version
+$taggedCargoVersion = Get-CargoPackageVersion (git show ("{0}:src-tauri/Cargo.toml" -f $tagName) | Out-String)
+$taggedTauriVersion = ((git show ("{0}:src-tauri/tauri.conf.json" -f $tagName) | Out-String) | ConvertFrom-Json).version
+Assert-VersionMatches "Tag $tagName" $Version $taggedPackageVersion $taggedCargoVersion $taggedTauriVersion
 Pop-Location
 
 Write-Host "`n=== 完成! ===" -ForegroundColor Green
@@ -190,14 +257,6 @@ if ($Push) {
     git push $remoteName HEAD
     if ($LASTEXITCODE -ne 0) { Write-Error "推送 commit 失败"; exit 1 }
 
-    $remoteTag = git ls-remote --tags $remoteName "refs/tags/$tagName"
-    if ($LASTEXITCODE -ne 0) { Write-Error "检查远程 tag $tagName 失败"; exit 1 }
-    if ($remoteTag) {
-        Write-Host "远程 tag $tagName 已存在，先删除后重新推送 ..." -ForegroundColor Yellow
-        git push $remoteName --delete $tagName
-        if ($LASTEXITCODE -ne 0) { Write-Error "删除远程 tag $tagName 失败"; exit 1 }
-    }
-
     git push $remoteName "refs/tags/$tagName"
     if ($LASTEXITCODE -ne 0) { Write-Error "推送 tag $tagName 失败"; exit 1 }
     Pop-Location
@@ -205,6 +264,5 @@ if ($Push) {
 } else {
     Write-Host "`n提示：运行以下命令推送到远程：" -ForegroundColor Gray
     Write-Host "  git push $remoteName HEAD"
-    Write-Host "  git push $remoteName --delete $tagName  # 如果远程已存在同名 tag"
     Write-Host "  git push $remoteName refs/tags/$tagName"
 }
