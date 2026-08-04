@@ -23,6 +23,7 @@ pub async fn scan_media_tag_cleanup(
     paths: Vec<String>,
     recursive: bool,
     author_folder_mode: String,
+    cleanup_mode: String,
     verify_content_hash: bool,
 ) -> Result<MediaTagCleanupResult, String> {
     if paths.is_empty() {
@@ -30,6 +31,7 @@ pub async fn scan_media_tag_cleanup(
     }
 
     let author_folder_mode = AuthorFolderMode::parse(&author_folder_mode)?;
+    let cleanup_mode = metadata::TagCleanupMode::parse(&cleanup_mode)?;
     let task_id = Uuid::new_v4().to_string();
     let _ = app.emit(
         "progress",
@@ -124,14 +126,15 @@ pub async fn scan_media_tag_cleanup(
                 media.artist.as_deref(),
                 author_folder_mode,
             );
-            let supported = metadata::supports_tag_cleanup(&path);
+            let write_check = metadata::validate_tag_cleanup_writable(&path);
+            let supported = write_check.is_ok();
             let sha256 = if supported && verify_content_hash {
                 hasher::compute_sha256(&path).unwrap_or_default()
             } else {
                 String::new()
             };
-            let skip_reason = if !supported {
-                Some("该格式暂不支持安全标签清洗".to_string())
+            let skip_reason = if let Err(error) = write_check {
+                Some(error)
             } else if verify_content_hash && sha256.is_empty() {
                 Some("无法生成文件内容快照，请检查文件是否可读取".to_string())
             } else if target_artist.is_none() {
@@ -170,6 +173,7 @@ pub async fn scan_media_tag_cleanup(
         task_id,
         source_paths: paths,
         author_folder_mode: author_folder_mode.as_str().into(),
+        cleanup_mode: cleanup_mode.as_str().into(),
         verify_content_hash,
         scanned_count: total,
         ready_count,
@@ -224,6 +228,7 @@ pub async fn execute_media_tag_cleanup(
     let task_id = request.task_id.clone();
     let assignments = request.author_assignments;
     let verify_content_hash = scan_result.verify_content_hash;
+    let cleanup_mode = metadata::TagCleanupMode::parse(&scan_result.cleanup_mode)?;
     let app_for_execute = app.clone();
     let (succeeded, failed, skipped, _operations) =
         tauri::async_runtime::spawn_blocking(move || {
@@ -312,6 +317,7 @@ pub async fn execute_media_tag_cleanup(
                                     &created_backup,
                                     artist,
                                     expected_execution_hash,
+                                    cleanup_mode,
                                 ) {
                                     Ok(()) => match hasher::compute_sha256(media_path) {
                                         Ok(cleaned_hash) => {

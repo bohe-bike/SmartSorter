@@ -16,6 +16,7 @@ import type {
   MediaTagCleanupExecuteRequest,
   MediaTagCleanupResult,
   AuthorFolderMode,
+  TagCleanupMode,
   ExecutionLog,
   ProgressEvent,
 } from "../types";
@@ -147,12 +148,14 @@ export async function scanMediaTagCleanup(
   paths: string[],
   recursive: boolean,
   authorFolderMode: AuthorFolderMode,
+  cleanupMode: TagCleanupMode,
   verifyContentHash: boolean,
 ): Promise<MediaTagCleanupResult> {
   return invoke<MediaTagCleanupResult>("scan_media_tag_cleanup", {
     paths,
     recursive,
     authorFolderMode,
+    cleanupMode,
     verifyContentHash,
   });
 }

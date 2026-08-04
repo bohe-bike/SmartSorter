@@ -12,11 +12,13 @@ import type {
   MediaTagCleanupFile,
   MediaTagCleanupResult,
   ProgressEvent,
+  TagCleanupMode,
 } from "../types";
 
 const sourcePaths = ref<string[]>([]);
 const recursive = ref(true);
 const authorFolderMode = ref<AuthorFolderMode | null>(null);
+const cleanupMode = ref<TagCleanupMode>("creator_only");
 const verifyContentHash = ref(false);
 const scanning = ref(false);
 const executing = ref(false);
@@ -113,6 +115,7 @@ async function scanFiles() {
       sourcePaths.value,
       recursive.value,
       folderMode,
+      cleanupMode.value,
       verifyContentHash.value,
     );
   } catch (error) {
@@ -225,6 +228,22 @@ onUnmounted(cleanupProgress);
             所选目录是作者
           </label>
         </div>
+      </div>
+      <div class="folder-mode-row">
+        <span class="label">清洗模式</span>
+        <div class="folder-mode-control">
+          <label :class="{ active: cleanupMode === 'creator_only' }">
+            <input v-model="cleanupMode" type="radio" value="creator_only" @change="invalidateScanResult" />
+            仅修复创作者（推荐）
+          </label>
+          <label :class="{ active: cleanupMode === 'full' }">
+            <input v-model="cleanupMode" type="radio" value="full" @change="invalidateScanResult" />
+            完整清洗标签
+          </label>
+        </div>
+      </div>
+      <div class="scan-note">
+        仅修复创作者会保留标题、专辑、曲目号、作曲者、封面等现有标签；完整清洗会删除这些可写描述标签，仅保留封面并写入 Artist / AlbumArtist。损坏或无法安全写入的标签会标为只读不可清洗。
       </div>
       <div class="folder-mode-row">
         <span class="label">内容校验</span>

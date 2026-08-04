@@ -97,6 +97,30 @@ pub fn media_type_label(path: &Path) -> Option<&'static str> {
     Some(media_type_name(get_media_type(path)?))
 }
 
+/// 标签清洗范围。完整清洗仅保留作者字段和封面；仅修复创作者会保留其他现有标签。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TagCleanupMode {
+    Full,
+    CreatorOnly,
+}
+
+impl TagCleanupMode {
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value.trim().to_lowercase().as_str() {
+            "full" => Ok(Self::Full),
+            "creator_only" => Ok(Self::CreatorOnly),
+            _ => Err("标签清洗模式无效，应为 full 或 creator_only".into()),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::CreatorOnly => "creator_only",
+        }
+    }
+}
+
 /// 仅允许已经由 lofty 稳定支持读写的音视频容器参与标签清洗。
 pub fn supports_tag_cleanup(path: &Path) -> bool {
     matches!(
@@ -108,12 +132,29 @@ pub fn supports_tag_cleanup(path: &Path) -> bool {
     )
 }
 
+pub fn validate_tag_cleanup_writable(path: &Path) -> Result<(), String> {
+    if !supports_tag_cleanup(path) {
+        return Err("该格式暂不支持安全标签清洗".into());
+    }
+    let tagged = Probe::open(path)
+        .map_err(|error| format!("打开媒体文件失败: {}", error))?
+        .options(ParseOptions::new())
+        .read()
+        .map_err(|error| format!("无法安全读取标签，已设为只读不可清洗: {}", error))?;
+    let tag_type = tagged.primary_tag_type();
+    if !tagged.supports_tag_type(tag_type) {
+        return Err("该媒体容器不支持写入主标签".into());
+    }
+    Ok(())
+}
+
 /// 删除文件中的可写描述标签，保留封面，并写入统一的 Artist / AlbumArtist。
 pub fn clean_tags_and_set_artist(
     path: &Path,
     backup: &Path,
     artist: &str,
     expected_hash: &str,
+    mode: TagCleanupMode,
 ) -> Result<(), String> {
     if !supports_tag_cleanup(path) {
         return Err("该格式暂不支持安全标签清洗".into());
@@ -128,7 +169,7 @@ pub fn clean_tags_and_set_artist(
     let rollback = sibling_work_path(path, "tag-rollback")?;
     executor::safe_copy(backup, &stage)?;
 
-    let write_result = rewrite_tags_in_place(&stage, &artist).and_then(|_| {
+    let write_result = rewrite_tags_in_place(&stage, &artist, mode).and_then(|_| {
         let cleaned = extract_tagged_media_all(&stage);
         if cleaned.artist.as_deref() != Some(artist.as_str())
             || cleaned.album_artist.as_deref() != Some(artist.as_str())
@@ -176,7 +217,7 @@ pub fn clean_tags_and_set_artist(
     Ok(())
 }
 
-fn rewrite_tags_in_place(path: &Path, artist: &str) -> Result<(), String> {
+fn rewrite_tags_in_place(path: &Path, artist: &str, mode: TagCleanupMode) -> Result<(), String> {
     let mut tagged = Probe::open(path)
         .map_err(|error| format!("打开媒体文件失败: {}", error))?
         .options(ParseOptions::new())
@@ -187,24 +228,38 @@ fn rewrite_tags_in_place(path: &Path, artist: &str) -> Result<(), String> {
         return Err("该媒体容器不支持写入主标签".into());
     }
 
-    // 清洗描述标签时仍保留用于资源管理器缩略图的内嵌封面。
-    let pictures = tagged
-        .tags()
-        .iter()
-        .flat_map(|tag| tag.pictures().iter().cloned())
-        .collect::<Vec<_>>();
-    let mut clean_tag = LoftyTag::new(tag_type);
-    if !clean_tag.insert_text(ItemKey::TrackArtist, artist.to_string())
-        || !clean_tag.insert_text(ItemKey::AlbumArtist, artist.to_string())
-    {
-        return Err("该媒体格式无法写入 Artist 或 AlbumArtist".into());
+    match mode {
+        TagCleanupMode::Full => {
+            let pictures = tagged
+                .tags()
+                .iter()
+                .flat_map(|tag| tag.pictures().iter().cloned())
+                .collect::<Vec<_>>();
+            let mut clean_tag = LoftyTag::new(tag_type);
+            if !clean_tag.insert_text(ItemKey::TrackArtist, artist.to_string())
+                || !clean_tag.insert_text(ItemKey::AlbumArtist, artist.to_string())
+            {
+                return Err("该媒体格式无法写入 Artist 或 AlbumArtist".into());
+            }
+            for picture in pictures {
+                clean_tag.push_picture(picture);
+            }
+            tagged.clear();
+            tagged.insert_tag(clean_tag);
+        }
+        TagCleanupMode::CreatorOnly => {
+            let tag = tagged
+                .primary_tag_mut()
+                .ok_or_else(|| "该媒体文件没有可写入的主标签".to_string())?;
+            tag.remove_key(&ItemKey::TrackArtist);
+            tag.remove_key(&ItemKey::AlbumArtist);
+            if !tag.insert_text(ItemKey::TrackArtist, artist.to_string())
+                || !tag.insert_text(ItemKey::AlbumArtist, artist.to_string())
+            {
+                return Err("该媒体格式无法写入 Artist 或 AlbumArtist".into());
+            }
+        }
     }
-    for picture in pictures {
-        clean_tag.push_picture(picture);
-    }
-
-    tagged.clear();
-    tagged.insert_tag(clean_tag);
     tagged
         .save_to_path(path, WriteOptions::default())
         .map_err(|error| format!("写入媒体标签失败: {}", error))
@@ -713,6 +768,16 @@ mod tests {
             "作者A".into(),
             "作者B".into(),
         ]));
+    }
+
+    #[test]
+    fn parses_tag_cleanup_modes() {
+        assert_eq!(TagCleanupMode::parse("full").unwrap(), TagCleanupMode::Full);
+        assert_eq!(
+            TagCleanupMode::parse("creator_only").unwrap(),
+            TagCleanupMode::CreatorOnly
+        );
+        assert!(TagCleanupMode::parse("unknown").is_err());
     }
 
     #[test]

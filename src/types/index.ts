@@ -312,11 +312,13 @@ export interface ClassifyPreviewResult {
 // ========== 媒体标签清洗 ==========
 
 export type AuthorFolderMode = "children" | "selected";
+export type TagCleanupMode = "full" | "creator_only";
 
 export interface MediaTagCleanupResult {
   task_id: string;
   source_paths: string[];
   author_folder_mode: AuthorFolderMode;
+  cleanup_mode: TagCleanupMode;
   verify_content_hash: boolean;
   scanned_count: number;
   ready_count: number;
