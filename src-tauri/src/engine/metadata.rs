@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use exif::{In, Reader as ExifReader, Tag, Value};
-use id3::{Tag as Id3Tag, TagLike};
+use id3::{Tag as Id3Tag, TagLike, Version as Id3Version};
 use lofty::config::{ParseOptions, WriteOptions};
 use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::picture::PictureType;
@@ -136,16 +136,16 @@ pub fn validate_tag_cleanup_writable(path: &Path) -> Result<(), String> {
     if !supports_tag_cleanup(path) {
         return Err("该格式暂不支持安全标签清洗".into());
     }
-    let tagged = Probe::open(path)
+    match Probe::open(path)
         .map_err(|error| format!("打开媒体文件失败: {}", error))?
         .options(ParseOptions::new())
         .read()
-        .map_err(|error| format!("无法安全读取标签，已设为只读不可清洗: {}", error))?;
-    let tag_type = tagged.primary_tag_type();
-    if !tagged.supports_tag_type(tag_type) {
-        return Err("该媒体容器不支持写入主标签".into());
+    {
+        Ok(tagged) if tagged.supports_tag_type(tagged.primary_tag_type()) => Ok(()),
+        Ok(_) => Err("该媒体容器不支持写入主标签".into()),
+        Err(error) if is_mp3(path) && Id3Tag::read_from_path(path).is_ok() => Ok(()),
+        Err(error) => Err(format!("无法安全读取标签，已设为只读不可清洗: {}", error)),
     }
-    Ok(())
 }
 
 /// 删除文件中的可写描述标签，保留封面，并写入统一的 Artist / AlbumArtist。
@@ -218,11 +218,17 @@ pub fn clean_tags_and_set_artist(
 }
 
 fn rewrite_tags_in_place(path: &Path, artist: &str, mode: TagCleanupMode) -> Result<(), String> {
-    let mut tagged = Probe::open(path)
+    let mut tagged = match Probe::open(path)
         .map_err(|error| format!("打开媒体文件失败: {}", error))?
         .options(ParseOptions::new())
         .read()
-        .map_err(|error| format!("读取媒体标签失败: {}", error))?;
+    {
+        Ok(tagged) => tagged,
+        Err(error) if is_mp3(path) && mode == TagCleanupMode::CreatorOnly => {
+            return rewrite_mp3_id3_fallback(path, artist);
+        }
+        Err(error) => return Err(format!("读取媒体标签失败: {}", error)),
+    };
     let tag_type = tagged.primary_tag_type();
     if !tagged.supports_tag_type(tag_type) {
         return Err("该媒体容器不支持写入主标签".into());
@@ -263,6 +269,25 @@ fn rewrite_tags_in_place(path: &Path, artist: &str, mode: TagCleanupMode) -> Res
     tagged
         .save_to_path(path, WriteOptions::default())
         .map_err(|error| format!("写入媒体标签失败: {}", error))
+}
+
+fn is_mp3(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("mp3"))
+}
+
+fn rewrite_mp3_id3_fallback(path: &Path, artist: &str) -> Result<(), String> {
+    let mut tag =
+        Id3Tag::read_from_path(path).map_err(|error| format!("ID3 回退读取失败: {}", error))?;
+    // 畸形日期帧会使 lofty 拒绝整个文件；移除这些帧但保留标题、封面及其它标签。
+    for frame in ["TDRC", "TYER", "TDAT", "TIME", "TDRL", "TDOR"] {
+        tag.remove(frame);
+    }
+    tag.set_artist(artist);
+    tag.set_album_artist(artist);
+    tag.write_to_path(path, Id3Version::Id3v24)
+        .map_err(|error| format!("ID3 回退写入失败: {}", error))
 }
 
 fn sibling_work_path(path: &Path, purpose: &str) -> Result<PathBuf, String> {
